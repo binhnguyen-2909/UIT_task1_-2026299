@@ -1,158 +1,91 @@
-"""
-Verify both Task 1 and Task 2 submissions
-"""
+"""Validate DSC 2026 Task 1/Task 2 submissions before upload."""
 
-import json
-import zipfile
+from __future__ import annotations
+
+import argparse
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding='utf-8')
-
-TASK1_DIR = Path("d:/projects/UIT DSC/Task1 - LegalIR")
-TASK2_DIR = Path("d:/projects/UIT DSC/Task2 - LegalQA")
+from submission_utils import SubmissionError, validate_submission_file
 
 
-def verify_task1():
-    """Verify Task 1 submission format."""
-    print("="*60)
-    print("VERIFYING TASK 1 SUBMISSION")
-    print("="*60)
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-    zip_path = TASK1_DIR / "output" / "submission.zip"
 
-    if not zip_path.exists():
-        print(f"❌ ERROR: {zip_path} not found!")
+def verify(task: int, submission_path: Path, input_path: Path | None) -> bool:
+    """Validate one submission and print a compact report."""
+    label = "LegalIR" if task == 1 else "LegalQA"
+    print(f"\nTask {task} - {label}")
+    print("-" * 60)
+    try:
+        submission, errors = validate_submission_file(
+            submission_path, task=task, input_path=input_path
+        )
+    except (OSError, ValueError, SubmissionError) as exc:
+        print(f"[INVALID] {exc}")
         return False
 
-    # Load from zip
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        if "submission.json" not in z.namelist():
-            print("❌ ERROR: submission.json not in zip!")
-            return False
-
-        content = z.read("submission.json").decode('utf-8')
-        submission = json.loads(content)
-
-    # Validate format
-    errors = []
-    total_answers = 0
-
-    for qid, item in submission.items():
-        if "answer" not in item:
-            errors.append(f"{qid}: Missing 'answer' field")
-            continue
-
-        answers = item["answer"]
-
-        if not isinstance(answers, list):
-            errors.append(f"{qid}: 'answer' is not a list")
-            continue
-
-        total_answers += len(answers)
-
-        if len(answers) > 5:
-            errors.append(f"{qid}: More than 5 answers ({len(answers)})")
-
-        if len(answers) != len(set(answers)):
-            errors.append(f"{qid}: Duplicate doc_ids found")
-
-        for ans in answers:
-            if not isinstance(ans, str):
-                errors.append(f"{qid}: Non-string doc_id")
-
-    print(f"\n📊 Statistics:")
-    print(f"   Total questions: {len(submission)}")
-    print(f"   Total answers: {total_answers}")
-    print(f"   Avg answers/question: {total_answers/len(submission):.2f}")
+    print(f"Questions: {len(submission)}")
+    if task == 1:
+        counts = [len(item["answer"]) for item in submission.values()]
+        print(f"Predicted doc IDs: {sum(counts)} (avg {sum(counts)/len(counts):.2f})")
+    else:
+        lengths = [len(item["answer"]) for item in submission.values()]
+        print(f"Answer characters: {sum(lengths):,} (avg {sum(lengths)/len(lengths):.0f})")
 
     if errors:
-        print(f"\n❌ {len(errors)} errors found:")
-        for err in errors[:10]:
-            print(f"   - {err}")
+        print(f"[INVALID] {len(errors)} error(s)")
+        for error in errors[:20]:
+            print(f"  - {error}")
         return False
-    else:
-        print("\n✅ Task 1 submission is VALID!")
-        return True
+    print("[VALID] Format, IDs, and archive contract passed")
+    return True
 
 
-def verify_task2():
-    """Verify Task 2 submission format."""
-    print("\n" + "="*60)
-    print("VERIFYING TASK 2 SUBMISSION")
-    print("="*60)
-
-    zip_path = TASK2_DIR / "output" / "submission.zip"
-
-    if not zip_path.exists():
-        print(f"❌ ERROR: {zip_path} not found!")
-        return False
-
-    # Load from zip
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        if "submission.json" not in z.namelist():
-            print("❌ ERROR: submission.json not in zip!")
-            return False
-
-        content = z.read("submission.json").decode('utf-8')
-        submission = json.loads(content)
-
-    # Validate format
-    errors = []
-    total_chars = 0
-
-    for qid, item in submission.items():
-        if "answer" not in item:
-            errors.append(f"{qid}: Missing 'answer' field")
-            continue
-
-        answer = item["answer"]
-
-        if not isinstance(answer, str):
-            errors.append(f"{qid}: 'answer' is not a string")
-            continue
-
-        total_chars += len(answer)
-
-        if not answer.strip():
-            errors.append(f"{qid}: Empty answer")
-
-    print(f"\n📊 Statistics:")
-    print(f"   Total questions: {len(submission)}")
-    print(f"   Total characters: {total_chars:,}")
-    print(f"   Avg answer length: {total_chars/len(submission):.0f} chars")
-
-    if errors:
-        print(f"\n❌ {len(errors)} errors found:")
-        for err in errors[:10]:
-            print(f"   - {err}")
-        return False
-    else:
-        print("\n✅ Task 2 submission is VALID!")
-        return True
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--task", choices=("1", "2", "both"), default="both",
+        help="Validate one task independently or both tasks together",
+    )
+    parser.add_argument(
+        "--task1-submission",
+        type=Path,
+        default=REPO_ROOT / "Task1 - LegalIR" / "output" / "submission.zip",
+    )
+    parser.add_argument(
+        "--task2-submission",
+        type=Path,
+        default=REPO_ROOT / "Task2 - LegalQA" / "output" / "submission.zip",
+    )
+    parser.add_argument(
+        "--task1-input",
+        type=Path,
+        default=REPO_ROOT / "Task1 - LegalIR" / "warmup.json",
+        help="warmup/public-official JSON used to enforce exact question IDs",
+    )
+    parser.add_argument(
+        "--task2-input",
+        type=Path,
+        default=REPO_ROOT / "Task2 - LegalQA" / "warmup.json",
+    )
+    return parser
 
 
-def main():
-    print("\n" + "="*60)
-    print("SUBMISSION VERIFICATION")
-    print("="*60)
-
-    t1_ok = verify_task1()
-    t2_ok = verify_task2()
-
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-    print(f"Task 1 (Legal IR):  {'✅ VALID' if t1_ok else '❌ INVALID'}")
-    print(f"Task 2 (Legal QA):  {'✅ VALID' if t2_ok else '❌ INVALID'}")
-
-    if t1_ok and t2_ok:
-        print("\n🎉 Both submissions are ready for upload!")
-    else:
-        print("\n⚠️ Please fix errors before uploading.")
-
-    print("="*60)
+def main() -> int:
+    args = build_parser().parse_args()
+    print("=" * 60)
+    print("DSC 2026 SUBMISSION VERIFICATION")
+    print("=" * 60)
+    checks = []
+    if args.task in ("1", "both"):
+        checks.append(verify(1, args.task1_submission, args.task1_input))
+    if args.task in ("2", "both"):
+        checks.append(verify(2, args.task2_submission, args.task2_input))
+    ready = all(checks)
+    print("\n" + ("READY TO UPLOAD" if ready else "FIX ERRORS BEFORE UPLOAD"))
+    return 0 if ready else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

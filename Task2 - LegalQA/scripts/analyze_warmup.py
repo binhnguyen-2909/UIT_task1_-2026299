@@ -1,97 +1,55 @@
-"""
-Analyze Task 2 Warmup Data
-============================
-Phân tích chi tiết warmup.json cho Task 2 Legal QA.
-"""
+"""Portable Task 2 warmup statistics."""
 
+from __future__ import annotations
+
+import argparse
 import json
+import statistics
 import sys
-import re
 from collections import Counter
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding='utf-8')
 
-WARMUP_PATH = Path("d:/projects/UIT DSC/Task2 - LegalQA/warmup.json")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
-def analyze():
-    """Phân tích chi tiết Task 2 warmup data."""
-    print("="*60)
-    print("TASK 2 WARMUP DATA ANALYSIS")
-    print("="*60)
+ROOT = Path(__file__).resolve().parent.parent
 
-    # Load
-    with open(WARMUP_PATH, 'r', encoding='utf-8') as f:
-        data = json.load(f)
 
-    print(f"\n📊 Dataset Statistics:")
-    print(f"   Total questions: {len(data)}")
-
-    # Question length analysis
-    q_lengths = [len(item['question']) for item in data.values()]
-    print(f"\n📝 Question Length:")
-    print(f"   Avg: {sum(q_lengths)/len(q_lengths):.0f} chars")
-    print(f"   Min: {min(q_lengths)} chars")
-    print(f"   Max: {max(q_lengths)} chars")
-
-    # Answer length analysis
-    a_lengths = [len(item['answer']) for item in data.values()]
-    print(f"\n💬 Answer Length:")
-    print(f"   Avg: {sum(a_lengths)/len(a_lengths):.0f} chars")
-    print(f"   Min: {min(a_lengths)} chars")
-    print(f"   Max: {max(a_lengths)} chars")
-
-    # Distribution
-    print(f"\n📈 Answer Length Distribution:")
-    ranges = [(0, 500), (500, 1000), (1000, 2000), (2000, 5000), (5000, 10000)]
-    for lo, hi in ranges:
-        count = sum(1 for l in a_lengths if lo <= l < hi)
-        pct = count/len(a_lengths)*100
-        bar = "█" * int(pct/2)
-        print(f"   {lo:>5}-{hi:<5} chars: {count:>4} ({pct:5.1f}%) {bar}")
-
-    # Legal document references
-    print(f"\n📚 Legal Document References:")
-    all_refs = []
+def analyze(path: Path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    question_lengths = [len(item["question"]) for item in data.values()]
+    answer_lengths = [len(item["answer"]) for item in data.values()]
+    references = Counter()
+    import re
     for item in data.values():
-        answer = item['answer']
+        references.update(match.casefold() for match in re.findall(
+            r"\b(?:Điều|Khoản|Điểm|Chương)\s+(?:\d+[a-z]?|[IVXLCDM]+)", item["answer"], re.IGNORECASE
+        ))
+    result = {
+        "questions": len(data),
+        "question_length": {
+            "min": min(question_lengths), "max": max(question_lengths),
+            "mean": statistics.fmean(question_lengths), "median": statistics.median(question_lengths),
+        },
+        "answer_length": {
+            "min": min(answer_lengths), "max": max(answer_lengths),
+            "mean": statistics.fmean(answer_lengths), "median": statistics.median(answer_lengths),
+        },
+        "top_legal_references": references.most_common(30),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
 
-        # Extract Điều X references
-        dieu_refs = re.findall(r'Điều\s+\d+', answer)
-        all_refs.extend(dieu_refs)
 
-        # Extract Nghị định X
-        nd_refs = re.findall(r'Nghị định\s+\d+/\d+/NĐ-CP', answer)
-        all_refs.extend(nd_refs)
-
-        # Extract Luật references
-        luat_refs = re.findall(r'Luật\s+[A-ZÀÁẢÃẠĂẮẰẲẴẶÂẤẦẨẬẪÈÉẺẼẸÊẾỀỂỄỆÌÍỈĨỊÒÓỎÕỌÔỐỒỔỘỖƠỚỜỞỠỢÙÚỦŨỤƯỨỪỬỮỰỲÝỶỸỴĐ][a-zàáảãạăắằẳẵặâấầẩậẫèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổộỗơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+', answer)
-        all_refs.extend(luat_refs)
-
-    ref_counter = Counter(all_refs)
-    print(f"   Total legal references: {len(all_refs)}")
-    print(f"   Unique references: {len(ref_counter)}")
-    print(f"\n   Top 10 most cited:")
-    for ref, count in ref_counter.most_common(10):
-        print(f"      {ref}: {count} times")
-
-    # Sample analysis
-    print(f"\n📋 Sample Questions & Answers:")
-    print("="*60)
-
-    for i, (qid, item) in enumerate(data.items()):
-        if i >= 3:
-            break
-
-        print(f"\n[Q{qid}]")
-        print(f"Question ({len(item['question'])} chars):")
-        print(f"  {item['question']}")
-        print(f"\nAnswer ({len(item['answer'])} chars):")
-        print(f"  {item['answer'][:300]}...")
-
-    print("\n" + "="*60)
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--warmup", type=Path, default=ROOT / "warmup.json")
+    args = parser.parse_args()
+    analyze(args.warmup)
+    return 0
 
 
 if __name__ == "__main__":
-    analyze()
+    raise SystemExit(main())

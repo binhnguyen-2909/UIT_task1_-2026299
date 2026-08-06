@@ -1,0 +1,46 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.DS_Store
+__MACOSX/
+._*
+
+# Generated indexes and model caches
+**/data/processed/
+**/.cache/
+**/data/models/
+Task*/models/
+models/*
+!models/approved_models.example.json
+**/output/inference_audit.json
+
+# Local test/coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# BTC official corpus (large; not for public repo)
+# Keep raw/ folder but ignore the heavy extracted data and downloads.
+**/selected-contexts
+**/selected-contexts.zip
+**/data/raw/**/*.zip
+**/data/raw/**/*.tar*
+**/data/raw/selected-contexts/
+
+# BTC train/public official JSON (institutional data, not public)
+**/train.json
+**/public-official.json
+**/private-official.json
+**/warmup.json
+
+# Submission output sidecars (JSON review copies; keep only the ZIP)
+Task*/output/*.json
+!Task1 - LegalIR/output/public_submission_recall_v3.zip
+
+# Audit/benchmark reports that can be re-generated from scripts
+**/reports/v3_*.json
+**/reports/recall_*.json
+**/reports/public_inference_*.audit.json
+**/reports/public_inference_*.checkpoint.json
+!Task1 - LegalIR/reports/public_data_audit.json
+!Task1 - LegalIR/reports/v3_document_fts_agent_100.json

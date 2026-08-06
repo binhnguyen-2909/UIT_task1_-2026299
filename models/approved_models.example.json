@@ -1,0 +1,15 @@
+{
+  "parameter_limit": 4000000000,
+  "models": [
+    {
+      "id": "replace-with-btc-approved-model-id",
+      "component": "embedding",
+      "local_path": "D:/models/replace-me",
+      "parameters": 1,
+      "license": "replace-with-verified-license",
+      "registered": false,
+      "btc_approved": false,
+      "approval_evidence": "replace-with-BTC-approval-reference"
+    }
+  ]
+}

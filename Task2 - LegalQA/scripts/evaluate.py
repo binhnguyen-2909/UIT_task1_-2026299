@@ -1,196 +1,125 @@
-"""
-Task 2 Evaluation - METEOR & ROUGE-L
-======================================
-Tính METEOR và ROUGE-L scores cho Task 2 predictions.
+"""Local Task 2 evaluation aligned with the BTC ROUGE-L/METEOR scorer."""
 
-Note: Đây là simplified implementation. Để có kết quả chính xác,
-nên dùng official packages: nltk.translate.meteor_score và rouge_score.
-"""
+from __future__ import annotations
 
+import argparse
 import json
-import sys
-from pathlib import Path
-from collections import Counter
 import re
-from typing import List, Set
-
-sys.stdout.reconfigure(encoding='utf-8')
-
-
-def tokenize(text: str) -> List[str]:
-    """Simple Vietnamese tokenizer."""
-    text = text.lower().strip()
-    # Remove punctuation nhưng giữ lại words
-    words = re.findall(r'[\w]+', text, re.UNICODE)
-    return words
+import zipfile
+from pathlib import Path
+from typing import Any, Dict, List
 
 
-def lcs_length(x: List, y: List) -> int:
-    """Longest Common Subsequence length."""
-    m, n = len(x), len(y)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
+ASCII_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if x[i-1] == y[j-1]:
-                dp[i][j] = dp[i-1][j-1] + 1
+
+def btc_rouge_tokens(text: str) -> List[str]:
+    """Mirror bundled rouge_score/tokenize.py: lowercase ASCII tokens only."""
+    return ASCII_TOKEN_RE.findall(str(text).lower())
+
+
+def lcs_length(left: List[str], right: List[str]) -> int:
+    """LCS length using O(min(m,n)) memory."""
+    if len(left) < len(right):
+        left, right = right, left
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for column, right_token in enumerate(right, 1):
+            if left_token == right_token:
+                current.append(previous[column - 1] + 1)
             else:
-                dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+                current.append(max(previous[column], current[-1]))
+        previous = current
+    return previous[-1]
 
-    return dp[m][n]
 
-
-def rouge_l(prediction: str, reference: str, beta: float = 1.2) -> float:
-    """
-    Compute ROUGE-L F-measure.
-
-    ROUGE-L = ((1 + beta^2) * P * R) / (R + beta^2 * P)
-    P = LCS(pred, ref) / len(pred)
-    R = LCS(pred, ref) / len(ref)
-    """
-    pred_tokens = tokenize(prediction)
-    ref_tokens = tokenize(reference)
-
-    if not pred_tokens or not ref_tokens:
+def rouge_l_fmeasure(reference: str, prediction: str) -> float:
+    reference_tokens = btc_rouge_tokens(reference)
+    prediction_tokens = btc_rouge_tokens(prediction)
+    if not reference_tokens or not prediction_tokens:
         return 0.0
-
-    lcs = lcs_length(pred_tokens, ref_tokens)
-
-    precision = lcs / len(pred_tokens)
-    recall = lcs / len(ref_tokens)
-
-    if precision + recall == 0:
-        return 0.0
-
-    f_score = ((1 + beta**2) * precision * recall) / (recall + beta**2 * precision)
-    return f_score
+    if reference_tokens == prediction_tokens:
+        return 1.0
+    hits = lcs_length(reference_tokens, prediction_tokens)
+    precision = hits / len(prediction_tokens)
+    recall = hits / len(reference_tokens)
+    return 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
 
 
-def meteor_score(prediction: str, reference: str) -> float:
-    """
-    Simplified METEOR score.
-
-    METEOR = F_mean * (1 - Penalty)
-    F_mean = (10 * P * R) / (R + 9 * P)
-    """
-    pred_tokens = tokenize(prediction)
-    ref_tokens = tokenize(reference)
-
-    if not pred_tokens or not ref_tokens:
-        return 0.0
-
-    # Count matches
-    pred_counter = Counter(pred_tokens)
-    ref_counter = Counter(ref_tokens)
-
-    matches = sum((pred_counter & ref_counter).values())
-
-    if matches == 0:
-        return 0.0
-
-    # Precision and Recall
-    precision = matches / len(pred_tokens)
-    recall = matches / len(ref_tokens)
-
-    # F-mean (weighted harmonic mean)
-    f_mean = (10 * precision * recall) / (recall + 9 * precision)
-
-    # Penalty for fragmentation
-    # Simplified: count contiguous matches
-    chunks = 0
-    i = 0
-    while i < len(pred_tokens):
-        if pred_tokens[i] in ref_tokens:
-            j = i
-            while j < len(pred_tokens) and pred_tokens[j] in ref_tokens:
-                j += 1
-            chunks += 1
-            i = j
-        else:
-            i += 1
-
-    penalty = 0.5 * (chunks / matches) ** 3 if matches > 0 else 0
-
-    score = f_mean * (1 - penalty)
-    return score
+def meteor(reference: str, prediction: str) -> float:
+    """Call the same NLTK function and raw whitespace split as BTC."""
+    reference_tokens = str(reference).split()
+    prediction_tokens = str(prediction).split()
+    # NLTK's exact-token case has one alignment chunk and can be evaluated
+    # without WordNet. This keeps the copied warmup sanity check available in
+    # a minimal environment while all non-trivial cases still require NLTK.
+    if reference_tokens and reference_tokens == prediction_tokens:
+        return 1.0 - 0.5 * (1.0 / len(reference_tokens)) ** 3
+    try:
+        from nltk.translate.meteor_score import meteor_score
+        return float(meteor_score([reference_tokens], prediction_tokens))
+    except ImportError as exc:
+        raise RuntimeError("Install nltk from requirements-eval.txt for METEOR") from exc
+    except LookupError as exc:
+        raise RuntimeError(
+            "NLTK wordnet/omw-1.4 are missing. Install them before the offline contest "
+            "environment is locked; evaluation never downloads resources automatically."
+        ) from exc
 
 
-def evaluate(predictions_path: str, references_path: str):
-    """Evaluate predictions against references."""
-    print("="*60)
-    print("TASK 2 EVALUATION - METEOR & ROUGE-L")
-    print("="*60)
+def _answers(data: Dict[str, Any], predictions: bool) -> Dict[str, str]:
+    output: Dict[str, str] = {}
+    for qid, value in data.items():
+        # Warmup files contain {question, answer}; the scoring container's
+        # reference file contains the answer string directly. Support both.
+        answer = value.get("answer") if isinstance(value, dict) else value
+        if not isinstance(answer, str):
+            raise ValueError(f"{qid}: answer must be a string")
+        output[str(qid)] = answer
+    return output
 
-    # Load
-    with open(predictions_path, 'r', encoding='utf-8') as f:
-        predictions = json.load(f)
 
-    with open(references_path, 'r', encoding='utf-8') as f:
-        references = json.load(f)
+def evaluate_data(predictions: Dict[str, Any], references: Dict[str, Any]) -> Dict[str, float]:
+    predicted = _answers(predictions, predictions=True)
+    truth = _answers(references, predictions=False)
+    if set(predicted) != set(truth):
+        missing = sorted(set(truth) - set(predicted))
+        extra = sorted(set(predicted) - set(truth))
+        raise ValueError(f"Question ID mismatch; missing={missing[:5]}, extra={extra[:5]}")
+    rouge_scores = [rouge_l_fmeasure(truth[qid], predicted[qid]) for qid in predicted]
+    meteor_scores = [meteor(truth[qid], predicted[qid]) for qid in predicted]
+    count = len(predicted)
+    return {
+        "rouge": sum(rouge_scores) / count if count else 0.0,
+        "meteor": sum(meteor_scores) / count if count else 0.0,
+        "questions": count,
+    }
 
-    print(f"\n📊 Evaluating {len(predictions)} predictions...")
 
-    meteor_scores = []
-    rouge_l_scores = []
-
-    for qid in predictions:
-        if qid not in references:
-            continue
-
-        pred_answer = predictions[qid].get('answer', '')
-        ref_answer = references[qid].get('answer', '')
-
-        if not pred_answer or not ref_answer:
-            continue
-
-        # Compute metrics
-        meteor = meteor_score(pred_answer, ref_answer)
-        rouge = rouge_l(pred_answer, ref_answer)
-
-        meteor_scores.append(meteor)
-        rouge_l_scores.append(rouge)
-
-    # Aggregate (sample first 50 để demo nhanh)
-    sample_size = min(50, len(meteor_scores))
-    meteor_sample = meteor_scores[:sample_size]
-    rouge_sample = rouge_l_scores[:sample_size]
-
-    if meteor_scores:
-        avg_meteor = sum(meteor_scores) / len(meteor_scores)
-        avg_rouge_l = sum(rouge_l_scores) / len(rouge_l_scores)
-
-        print(f"\n📈 Results:")
-        print(f"   Evaluated: {len(meteor_scores)} questions")
-        print(f"\n   METEOR (Primary):")
-        print(f"      Average: {avg_meteor:.4f}")
-        print(f"      Min:     {min(meteor_scores):.4f}")
-        print(f"      Max:     {max(meteor_scores):.4f}")
-
-        print(f"\n   ROUGE-L (Secondary):")
-        print(f"      Average: {avg_rouge_l:.4f}")
-        print(f"      Min:     {min(rouge_l_scores):.4f}")
-        print(f"      Max:     {max(rouge_l_scores):.4f}")
-
-        # Distribution (sample only)
-        print(f"\n   METEOR Distribution (sample of {sample_size}):")
-        ranges = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]
-        for lo, hi in ranges:
-            count = sum(1 for s in meteor_sample if lo <= s < hi)
-            pct = count / sample_size * 100 if sample_size > 0 else 0
-            bar = "█" * int(pct / 2)
-            print(f"      {lo:.1f}-{hi:.1f}: {count:>4} ({pct:5.1f}%) {bar}")
+def load_json_or_zip(path: Path) -> Dict[str, Any]:
+    if path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(path, "r") as archive:
+            names = [item.filename for item in archive.infolist() if not item.is_dir()]
+            if names != ["submission.json"]:
+                raise ValueError(f"ZIP must contain exactly submission.json, found {names}")
+            data = json.loads(archive.read("submission.json").decode("utf-8"))
     else:
-        print("❌ No valid predictions to evaluate!")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("JSON root must be an object")
+    return data
 
-    print("\n" + "="*60)
 
-
-def main():
-    pred_path = Path("d:/projects/UIT DSC/Task2 - LegalQA/output/submission.json")
-    ref_path = Path("d:/projects/UIT DSC/Task2 - LegalQA/warmup.json")
-
-    evaluate(str(pred_path), str(ref_path))
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--references", type=Path, required=True)
+    args = parser.parse_args()
+    scores = evaluate_data(load_json_or_zip(args.predictions), load_json_or_zip(args.references))
+    print(json.dumps(scores, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

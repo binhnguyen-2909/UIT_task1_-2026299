@@ -1,0 +1,5 @@
+-r requirements-core.txt
+torch>=2.2,<3
+transformers>=4.46,<6
+sentence-transformers>=3,<6
+accelerate>=0.34,<2

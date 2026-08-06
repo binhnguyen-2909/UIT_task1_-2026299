@@ -1,356 +1,172 @@
-"""
-BM25 Sparse Retrieval Module
-============================
-BM25 (Best Matching 25) algorithm for sparse text retrieval.
-"""
+"""Fast deterministic BM25 retrieval for Vietnamese legal passages."""
 
-import pickle
+from __future__ import annotations
+
 import json
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional
-import numpy as np
-from collections import Counter
 import math
-import logging
+import pickle
+import re
+import unicodedata
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+
+# Keep negation, modality and legal-domain words: they frequently decide which
+# provision is relevant.  Only remove very common function words.
+DEFAULT_STOPWORDS = {
+    "và", "của", "là", "các", "một", "những", "đó", "này", "tại",
+    "từ", "với", "cho", "về", "do", "bởi", "thì", "mà", "cũng", "đang",
+}
+TOKEN_RE = re.compile(r"[0-9]+(?:[./-][0-9a-z]+)*|[^\W_]+", re.UNICODE)
 
 
 class VietnameseTokenizer:
-    """Simple Vietnamese tokenizer for BM25."""
+    """Small dependency-free tokenizer with optional word bigrams."""
 
-    def __init__(self, stopwords: Optional[List[str]] = None):
-        self.stopwords = set(stopwords) if stopwords else set()
-        # Common Vietnamese words to filter
-        self.vietnamese_stopwords = {
-            'và', 'của', 'là', 'có', 'được', 'theo', 'nào', 'này', 'năm',
-            'thế', 'ra', 'sao', 'như', 'đó', 'với', 'trong', 'cho', 'để',
-            'tại', 'từ', 'hoặc', 'về', 'pháp', 'luật', 'quy', 'định',
-            'hành', 'viên', 'người', 'doanh', 'nghiệp', 'cơ', 'quan',
-            'nhà', 'nước', 'thực', 'hiện', 'hồ', 'sơ', 'thủ', 'tục',
-            'một', 'các', 'khác', 'này', 'đó', 'vào', 'bộ', 'sở',
-            'đến', 'khi', 'trên', 'dưới', 'sau', 'trước', 'giữa',
-            'không', 'có', 'là', 'về', 'tại', 'để', 'với', 'cho',
-        }
-        self.stopwords.update(self.vietnamese_stopwords)
+    def __init__(self, stopwords: Optional[Iterable[str]] = None, bigrams: bool = True):
+        self.stopwords = set(DEFAULT_STOPWORDS if stopwords is None else stopwords)
+        self.bigrams = bigrams
 
     def tokenize(self, text: str) -> List[str]:
-        """Tokenize Vietnamese text."""
-        # Lowercase and normalize
-        text = text.lower().strip()
-
-        # Remove punctuation and split by whitespace
-        import re
-        tokens = re.findall(r'[\w]+', text, re.UNICODE)
-
-        # Remove stopwords and short tokens
-        tokens = [t for t in tokens if t not in self.stopwords and len(t) > 1]
-
-        return tokens
+        normalized = unicodedata.normalize("NFC", str(text)).casefold()
+        words = [token for token in TOKEN_RE.findall(normalized) if token not in self.stopwords]
+        if not self.bigrams:
+            return words
+        # Bigrams partially recover Vietnamese multi-syllable terms without
+        # requiring a word-segmentation package in the submission environment.
+        return words + [f"{a}__{b}" for a, b in zip(words, words[1:])]
 
 
 class BM25:
-    """
-    BM25 retrieval algorithm implementation.
-
-    BM25 formula:
-    score(D, Q) = sum over q in Q of:
-        IDF(q) * (tf(q, D) * (k1 + 1)) / (tf(q, D) + k1 * (1 - b + b * |D|/avgdl))
-    """
+    """BM25 using postings, so query time does not scan the whole corpus."""
 
     def __init__(self, k1: float = 1.5, b: float = 0.75):
-        self.k1 = k1
-        self.b = b
+        self.k1 = float(k1)
+        self.b = float(b)
         self.tokenizer = VietnameseTokenizer()
-        self.doc_lengths = []
-        self.avg_doc_length = 0
+        self.doc_lengths: List[int] = []
+        self.avg_doc_length = 1.0
         self.doc_count = 0
-        self.doc_freqs = {}  # term -> document frequency
-        self.idf = {}  # term -> IDF score
-        self.doc_term_freqs = []  # List of term frequencies per document
+        self.idf: Dict[str, float] = {}
+        self.postings: Dict[str, List[Tuple[int, int]]] = {}
 
-    def fit(self, documents: List[str]) -> 'BM25':
-        """
-        Build BM25 index from documents.
-
-        Args:
-            documents: List of document texts
-        """
-        self.doc_count = len(documents)
+    def fit(self, documents: List[str]) -> "BM25":
+        if not documents:
+            raise ValueError("Cannot build BM25 on an empty corpus")
+        raw_postings: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         self.doc_lengths = []
-        self.doc_term_freqs = []
-        self.doc_freqs = Counter()
+        for index, document in enumerate(documents):
+            counts = Counter(self.tokenizer.tokenize(document))
+            self.doc_lengths.append(sum(counts.values()))
+            for term, frequency in counts.items():
+                raw_postings[term].append((index, frequency))
 
-        for doc in documents:
-            # Tokenize document
-            tokens = self.tokenizer.tokenize(doc)
-            self.doc_lengths.append(len(tokens))
-
-            # Count term frequencies
-            term_freqs = Counter(tokens)
-            self.doc_term_freqs.append(term_freqs)
-
-            # Update document frequencies
-            for term in set(tokens):
-                self.doc_freqs[term] += 1
-
-        # Calculate average document length
-        self.avg_doc_length = sum(self.doc_lengths) / len(self.doc_lengths) if self.doc_lengths else 1
-
-        # Calculate IDF for all terms
-        self._calculate_idf()
-
-        logger.info(f"BM25 fitted on {self.doc_count} documents")
-        logger.info(f"Average doc length: {self.avg_doc_length:.1f} tokens")
-        logger.info(f"Vocabulary size: {len(self.doc_freqs)} unique terms")
-
+        self.doc_count = len(documents)
+        self.avg_doc_length = sum(self.doc_lengths) / self.doc_count or 1.0
+        self.postings = dict(raw_postings)
+        self.idf = {
+            term: math.log(1.0 + (self.doc_count - len(items) + 0.5) / (len(items) + 0.5))
+            for term, items in self.postings.items()
+        }
         return self
 
-    def _calculate_idf(self):
-        """Calculate IDF scores for all terms."""
-        for term, df in self.doc_freqs.items():
-            # IDF formula with smoothing
-            self.idf[term] = math.log(
-                (self.doc_count - df + 0.5) / (df + 0.5) + 1
-            )
-
-    def get_scores(self, query: str) -> np.ndarray:
-        """
-        Get BM25 scores for all documents given a query.
-
-        Args:
-            query: Query text
-
-        Returns:
-            Array of scores for each document
-        """
-        query_tokens = self.tokenizer.tokenize(query)
-        scores = np.zeros(self.doc_count)
-
-        for q in query_tokens:
-            if q not in self.idf:
+    def get_scores(self, query: str) -> List[float]:
+        scores = [0.0] * self.doc_count
+        query_counts = Counter(self.tokenizer.tokenize(query))
+        for term, query_frequency in query_counts.items():
+            if term not in self.postings:
                 continue
-
-            idf_q = self.idf[q]
-
-            for i, doc_freqs in enumerate(self.doc_term_freqs):
-                tf_q_d = doc_freqs.get(q, 0)
-                if tf_q_d > 0:
-                    # BM25 formula
-                    numerator = tf_q_d * (self.k1 + 1)
-                    denominator = tf_q_d + self.k1 * (1 - self.b + self.b * self.doc_lengths[i] / self.avg_doc_length)
-                    scores[i] += idf_q * (numerator / denominator)
-
+            idf = self.idf[term]
+            for doc_index, term_frequency in self.postings[term]:
+                length_norm = 1.0 - self.b + self.b * self.doc_lengths[doc_index] / self.avg_doc_length
+                numerator = term_frequency * (self.k1 + 1.0)
+                denominator = term_frequency + self.k1 * length_norm
+                scores[doc_index] += query_frequency * idf * numerator / denominator
         return scores
 
     def get_top_k(self, query: str, k: int = 20) -> List[Tuple[int, float]]:
-        """
-        Get top-k documents for a query.
-
-        Args:
-            query: Query text
-            k: Number of top documents to return
-
-        Returns:
-            List of (doc_index, score) tuples
-        """
+        if k <= 0:
+            return []
         scores = self.get_scores(query)
-        top_indices = np.argsort(scores)[::-1][:k]
-        return [(int(idx), float(scores[idx])) for idx in top_indices if scores[idx] > 0]
+        ranked = sorted(enumerate(scores), key=lambda pair: (-pair[1], pair[0]))
+        return [(index, score) for index, score in ranked[:k] if score > 0.0]
 
-    def save(self, path: Path):
-        """Save BM25 index to disk."""
-        data = {
-            'k1': self.k1,
-            'b': self.b,
-            'doc_lengths': self.doc_lengths,
-            'avg_doc_length': self.avg_doc_length,
-            'doc_count': self.doc_count,
-            'doc_freqs': dict(self.doc_freqs),
-            'idf': self.idf,
-            'doc_term_freqs': [dict(d) for d in self.doc_term_freqs],
-        }
-
-        with open(path, 'wb') as f:
-            pickle.dump(data, f)
-
-        logger.info(f"BM25 index saved to {path}")
+    def save(self, path: Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as handle:
+            pickle.dump(self.__dict__, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     @classmethod
-    def load(cls, path: Path) -> 'BM25':
-        """Load BM25 index from disk."""
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-
-        bm25 = cls(k1=data['k1'], b=data['b'])
-        bm25.doc_lengths = data['doc_lengths']
-        bm25.avg_doc_length = data['avg_doc_length']
-        bm25.doc_count = data['doc_count']
-        bm25.doc_freqs = Counter(data['doc_freqs'])
-        bm25.idf = data['idf']
-        bm25.doc_term_freqs = [Counter(d) for d in data['doc_term_freqs']]
-
-        logger.info(f"BM25 index loaded from {path}")
-        return bm25
+    def load(cls, path: Path) -> "BM25":
+        with Path(path).open("rb") as handle:
+            state = pickle.load(handle)
+        instance = cls(state["k1"], state["b"])
+        instance.__dict__.update(state)
+        return instance
 
 
 class BM25Retriever:
-    """
-    High-level BM25 retriever with caching and batch processing.
-    """
+    """BM25 plus stable chunk metadata and persistence."""
 
     def __init__(self, index_path: Optional[Path] = None, k1: float = 1.5, b: float = 0.75):
         self.index_path = Path(index_path) if index_path else None
-        self.bm25 = BM25(k1=k1, b=b)
-        self.documents = []
-        self.doc_id_map = {}  # index -> doc_id
+        self.bm25 = BM25(k1, b)
+        self.documents: List[Dict[str, Any]] = []
 
-    def build_index(self, documents: List[Dict], save_path: Optional[Path] = None):
-        """
-        Build BM25 index from documents.
-
-        Args:
-            documents: List of document dictionaries with 'doc_id' and 'text' keys
-            save_path: Optional path to save the index
-        """
-        # Extract texts and build mapping
-        self.documents = documents
-        self.doc_id_map = {i: doc['doc_id'] for i, doc in enumerate(documents)}
-
-        texts = [doc['text'] for doc in documents]
-        self.bm25.fit(texts)
-
+    def build_index(self, documents: List[Dict[str, Any]], save_path: Optional[Path] = None) -> None:
+        self.documents = [dict(document) for document in documents]
+        self.bm25.fit([str(document["text"]) for document in self.documents])
         if save_path:
             self.save(save_path)
 
-    def retrieve(self, query: str, top_k: int = 20) -> List[Dict]:
-        """
-        Retrieve top-k documents for a query.
-
-        Args:
-            query: Query text
-            top_k: Number of documents to retrieve
-
-        Returns:
-            List of retrieved documents with scores
-        """
-        results = self.bm25.get_top_k(query, k=top_k)
-
-        retrieved = []
-        for idx, score in results:
-            retrieved.append({
-                'doc_id': self.doc_id_map[idx],
-                'text': self.documents[idx]['text'],
-                'score': score,
-                'rank': len(retrieved) + 1,
-                'method': 'bm25'
+    def retrieve(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        results = []
+        for rank, (index, score) in enumerate(self.bm25.get_top_k(query, top_k), 1):
+            document = self.documents[index]
+            results.append({
+                "doc_id": str(document["doc_id"]),
+                "chunk_id": str(document.get("chunk_id", document["doc_id"])),
+                "text": str(document["text"]),
+                "score": float(score),
+                "rank": rank,
+                "method": "bm25",
+                "position": int(document.get("position", 0)),
             })
+        return results
 
-        return retrieved
+    def batch_retrieve(self, queries: List[str], top_k: int = 20) -> List[List[Dict[str, Any]]]:
+        return [self.retrieve(query, top_k) for query in queries]
 
-    def batch_retrieve(self, queries: List[str], top_k: int = 20) -> List[List[Dict]]:
-        """
-        Retrieve documents for multiple queries.
-
-        Args:
-            queries: List of query texts
-            top_k: Number of documents per query
-
-        Returns:
-            List of retrieval results per query
-        """
-        return [self.retrieve(q, top_k) for q in queries]
-
-    def save(self, path: Path):
-        """Save retriever state."""
+    def save(self, path: Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save BM25 index
-        self.bm25.save(path.with_suffix('.pkl'))
-
-        # Save metadata
-        metadata = {
-            'doc_id_map': self.doc_id_map,
-            'documents': self.documents
-        }
-        with open(path.with_suffix('.meta.json'), 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"BM25Retriever saved to {path}")
+        self.bm25.save(path.with_suffix(".pkl"))
+        path.with_suffix(".meta.json").write_text(
+            json.dumps({"documents": self.documents}, ensure_ascii=False), encoding="utf-8"
+        )
 
     @classmethod
-    def load(cls, path: Path) -> 'BM25Retriever':
-        """Load retriever state."""
+    def load(cls, path: Path) -> "BM25Retriever":
         path = Path(path)
-
-        # Load metadata
-        with open(path.with_suffix('.meta.json'), 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-
-        # Load BM25
-        bm25 = BM25.load(path.with_suffix('.pkl'))
-
-        retriever = cls()
-        retriever.bm25 = bm25
-        retriever.documents = metadata['documents']
-        retriever.doc_id_map = metadata['doc_id_map']
-
-        logger.info(f"BM25Retriever loaded from {path}")
-        return retriever
-
-
-# Vietnamese legal domain expansion
-LEGAL_QUERY_EXPANSION = {
-    'phạt': ['xử phạt', 'vi phạm', 'hành chính', 'tiền phạt'],
-    'thủ tục': ['trình tự', 'hồ sơ', 'đăng ký', 'cấp phép'],
-    'quyền': ['quyền hạn', 'thẩm quyền', 'quyết định'],
-    'nghĩa vụ': ['trách nhiệm', 'nghĩa vụ', 'bồi thường'],
-    'công ty': ['doanh nghiệp', 'tổ chức', 'pháp nhân'],
-}
+        instance = cls()
+        instance.bm25 = BM25.load(path.with_suffix(".pkl"))
+        instance.documents = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))["documents"]
+        return instance
 
 
 def expand_query(query: str) -> str:
-    """
-    Expand query with legal domain synonyms.
-
-    Args:
-        query: Original query
-
-    Returns:
-        Expanded query
-    """
-    expanded_terms = [query]
-
-    for term, synonyms in LEGAL_QUERY_EXPANSION.items():
-        if term in query.lower():
-            expanded_terms.extend(synonyms)
-
-    return ' '.join(expanded_terms)
-
-
-# Main execution for testing
-if __name__ == "__main__":
-    # Test BM25
-    docs = [
-        "Luật quản lý thuế quy định về thuế thu nhập doanh nghiệp.",
-        "Nghị định về xử phạt vi phạm hành chính trong lĩnh vực thuế.",
-        "Thông tư hướng dẫn thủ tục khai thuế và nộp thuế.",
-        "Quy định về trách nhiệm của người nộp thuế.",
-        "Chính sách ưu đãi thuế cho doanh nghiệp nhỏ và vừa."
-    ]
-
-    retriever = BM25Retriever()
-
-    # Build index
-    documents = [{'doc_id': str(i), 'text': doc} for i, doc in enumerate(docs)]
-    retriever.build_index(documents)
-
-    # Test retrieval
-    query = "thuế doanh nghiệp"
-    results = retriever.retrieve(query, top_k=3)
-
-    print(f"Query: {query}")
-    print(f"Top 3 results:")
-    for r in results:
-        print(f"  Doc {r['doc_id']} (score={r['score']:.3f}): {r['text'][:60]}...")
+    """Conservative rule expansion; only adds a handful of stable synonyms."""
+    groups = {
+        "xử phạt": ("vi phạm", "mức phạt"),
+        "thủ tục": ("trình tự", "hồ sơ"),
+        "nghĩa vụ": ("trách nhiệm",),
+        "cấp phép": ("giấy phép",),
+    }
+    additions: List[str] = []
+    lowered = query.casefold()
+    for trigger, synonyms in groups.items():
+        if trigger in lowered:
+            additions.extend(synonyms)
+    return " ".join([query, *additions]).strip()
