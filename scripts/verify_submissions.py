@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task1-submission",
         type=Path,
-        default=REPO_ROOT / "Task1 - LegalIR" / "output" / "submission.zip",
+        default=REPO_ROOT / "Task1 - LegalIR" / "output" / "public_submission_v4_chunkphrase.zip",
     )
     parser.add_argument(
         "--task2-submission",
@@ -61,8 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task1-input",
         type=Path,
-        default=REPO_ROOT / "Task1 - LegalIR" / "warmup.json",
-        help="warmup/public-official JSON used to enforce exact question IDs",
+        default=None,
+        help="optional warmup/public-official JSON used to enforce exact question IDs",
     )
     parser.add_argument(
         "--task2-input",

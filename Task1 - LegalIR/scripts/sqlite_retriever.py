@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import itertools
+import os
 import re
 import sqlite3
 import time
@@ -14,6 +15,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 try:
     from .bm25_retriever import VietnameseTokenizer, expand_query
     from .reranker import Reranker
@@ -22,6 +25,235 @@ except ImportError:
     from bm25_retriever import VietnameseTokenizer, expand_query
     from reranker import Reranker
     from retrieval_types import QueryResult, RetrievalResult
+
+
+# ─── Dense embedding cache ────────────────────────────────────────────────────────
+
+class DenseCache:
+    """GPU-accelerated embedding cache backed by SentenceTransformer.
+
+    Encode-once, query-many.  On a 6 GB laptop GPU the full 294 K chunk
+    index fits comfortably (≈ 294 K × 768 × 4 B ≈ 0.9 GB).
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        device: str = "cuda",
+        batch_size: int = 128,
+        max_seq_length: int = 512,
+    ):
+        self.model_path = model_path
+        self.device = device
+        self.batch_size = batch_size
+        self.max_seq_length = max_seq_length
+        self._embeddings: Optional[np.ndarray] = None
+        self._model: Any = None  # SentenceTransformer
+        self._chunk_meta: List[str] = []  # "doc_id|chunk_id"
+
+    def _load_model(self) -> Any:
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            # Resolve device: prefer cuda if available, otherwise cpu
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            try:
+                self._model = SentenceTransformer(
+                    self.model_path,
+                    device=device,
+                    local_files_only=True,
+                )
+            except (RuntimeError, Exception):
+                device = "cpu"
+                self._model = SentenceTransformer(
+                    self.model_path,
+                    device=device,
+                    local_files_only=True,
+                )
+            self._model.max_seq_length = self.max_seq_length
+        return self._model
+
+    @staticmethod
+    def _chunk_text(chunk: Dict[str, Any]) -> str:
+        title = chunk.get("title", "")
+        passage = chunk.get("passage", "")
+        return (title + "\n" + passage).strip()
+
+    def build(
+        self,
+        chunks: List[Dict[str, Any]],
+        save_path: Optional[Path] = None,
+        checkpoint_every: int = 500,
+    ) -> Dict[str, Any]:
+        """Encode all chunk texts and persist to disk.
+
+        Saves a checkpoint every ``checkpoint_every`` batches so that an interrupted
+        run can resume without re-encoding everything.
+        """
+        model = self._load_model()
+        texts = [self._chunk_text(c) for c in chunks]
+        total_chunks = len(texts)
+        total_batches = (total_chunks + self.batch_size - 1) // self.batch_size
+        started = time.perf_counter()
+
+        self._chunk_meta = [
+            str(c.get("chunk_id", c["doc_id"]))
+            for c in chunks
+        ]
+
+        checkpoint_path: Optional[Path] = None
+        resume_batch = 0
+        if save_path:
+            save_path = Path(save_path)
+            checkpoint_path = save_path.with_suffix(".ckpt.npy")
+            # Check for existing checkpoint
+            if checkpoint_path.exists():
+                ckpt_meta = checkpoint_path.with_suffix(".ckpt.meta.json")
+                if ckpt_meta.exists():
+                    meta = json.loads(ckpt_meta.read_text(encoding="utf-8"))
+                    resume_batch = meta.get("resume_batch", 0)
+                    print(f"DenseCache: resuming from batch {resume_batch}/{total_batches}", flush=True)
+                    self._embeddings = np.load(str(checkpoint_path))
+                    if resume_batch >= total_batches:
+                        # Fully encoded, just rename
+                        np.save(str(save_path.with_suffix(".npy")), self._embeddings)
+                        ckpt_meta.unlink(missing_ok=True)
+                        checkpoint_path.unlink(missing_ok=True)
+                        elapsed = time.perf_counter() - started
+                        return {"chunks": total_chunks, "embedding_dim": self._embeddings.shape[1], "seconds": elapsed, "resumed": True}
+                else:
+                    checkpoint_path = None
+
+        # Allocate output array
+        embed_dim = model.get_embedding_dimension() or 768
+        if resume_batch > 0 and self._embeddings is not None and self._embeddings.shape[0] >= total_chunks:
+            embeddings = self._embeddings
+        else:
+            embeddings = np.zeros((total_chunks, embed_dim), dtype=np.float32)
+            if resume_batch > 0 and self._embeddings is not None:
+                embeddings[: self._embeddings.shape[0]] = self._embeddings
+                del self._embeddings
+
+        # Encode remaining batches
+        batches_since_ckpt = 0
+        for batch_start in range(0, total_chunks, self.batch_size):
+            batch_idx = batch_start // self.batch_size
+            if batch_idx < resume_batch:
+                continue
+            batch_end = min(batch_start + self.batch_size, total_chunks)
+            batch_texts = texts[batch_start:batch_end]
+            batch_emb = model.encode(
+                batch_texts,
+                batch_size=len(batch_texts),
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype(np.float32)
+            embeddings[batch_start:batch_end] = batch_emb
+
+            # Progress log every 50 batches
+            if (batch_idx + 1) % 50 == 0:
+                elapsed = time.perf_counter() - started
+                rate = (batch_end) / elapsed if elapsed > 0 else 0
+                eta = (total_chunks - batch_end) / rate if rate > 0 else 0
+                print(f"DenseCache progress: {batch_end}/{total_chunks} chunks ({batch_end*100//total_chunks}%, batch {batch_idx+1}/{total_batches}, {elapsed:.0f}s elapsed, ETA {eta:.0f}s)", flush=True)
+
+            batches_since_ckpt += 1
+            done_chunks = min(batch_end, total_chunks)
+            if batches_since_ckpt >= checkpoint_every:
+                # Save checkpoint
+                ckpt_path = save_path.with_suffix(".ckpt.npy") if save_path else None
+                if ckpt_path:
+                    np.save(str(ckpt_path), embeddings)
+                    ckpt_path.with_suffix(".ckpt.meta.json").write_text(
+                        json.dumps({"resume_batch": batch_idx + 1, "total_chunks": total_chunks}, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                print(f"DenseCache checkpoint {done_chunks}/{total_chunks} chunks (batch {batch_idx+1}/{total_batches}) saved", flush=True)
+                batches_since_ckpt = 0
+
+        self._embeddings = embeddings
+        elapsed = time.perf_counter() - started
+
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            # Save final
+            np.save(str(save_path.with_suffix(".npy")), embeddings)
+            save_path.with_suffix(".ids.json").write_text(
+                json.dumps(self._chunk_meta, ensure_ascii=False), encoding="utf-8"
+            )
+            # Remove checkpoint files
+            for f in save_path.parent.glob("dense_embeddings.ckpt.*"):
+                f.unlink(missing_ok=True)
+
+        return {"chunks": total_chunks, "embedding_dim": embeddings.shape[1], "seconds": elapsed}
+
+    def load(self, path: Path) -> None:
+        path = Path(path)
+        self._embeddings = np.load(str(path.with_suffix(".npy")))
+        self._chunk_meta = json.loads(
+            path.with_suffix(".ids.json").read_text(encoding="utf-8")
+        )
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 40,
+    ) -> List[Dict[str, Any]]:
+        if self._embeddings is None:
+            raise RuntimeError("DenseCache: call build() or load() first")
+        model = self._load_model()
+        q_emb = model.encode(
+            [query],
+            batch_size=1,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )[0].astype(np.float32)
+        scores = self._embeddings @ q_emb
+        top_indices = np.argsort(-scores, kind="stable")[:top_k]
+        results = []
+        for idx in top_indices:
+            chunk_id = self._chunk_meta[idx]
+            # chunk_id format: "doc_id::chunk::N" — extract doc_id for retrieval
+            # but keep full chunk_id so we can match SQLite chunks table.
+            if "::chunk::" in chunk_id:
+                doc_id = chunk_id.split("::chunk::", 1)[0]
+            else:
+                doc_id = chunk_id
+            results.append({
+                "doc_id": doc_id,
+                "chunk_id": chunk_id,
+                "text": "",
+                "score": float(scores[idx]),
+                "raw_fts_score": float(scores[idx]),
+                "method": "dense_embedding",
+            })
+        return results
+
+    def rrf_fuse(
+        self,
+        fts_candidates: List[Dict[str, Any]],
+        dense_candidates: List[Dict[str, Any]],
+        fts_weight: float = 1.0,
+        dense_weight: float = 1.0,
+        rrf_k: int = 60,
+    ) -> List[Dict[str, Any]]:
+        by_id: Dict[str, Dict[str, Any]] = {}
+        fused: Dict[str, float] = defaultdict(float)
+        for weight, ranking in ((fts_weight, fts_candidates), (dense_weight, dense_candidates)):
+            for rank, item in enumerate(ranking, 1):
+                doc_id = item["doc_id"]
+                fused[doc_id] += weight / (rrf_k + rank)
+                if doc_id not in by_id:
+                    by_id[doc_id] = dict(item)
+        for doc_id, score in fused.items():
+            by_id[doc_id]["score"] = score
+        return sorted(
+            by_id.values(),
+            key=lambda item: (-float(item["score"]), item["doc_id"]),
+        )
 
 
 def normalize_question(text: str) -> str:
@@ -145,6 +377,13 @@ class SQLiteFTSRetriever:
     DOCUMENT_PHRASE_PAIR_LIMIT = 16
     DOCUMENT_PHRASE_RESULT_LIMIT = 80
 
+    # Chunk-level phrase fusion: weight/k tuned leak-free on holdout 100.
+    CHUNK_PHRASE_BASE_WEIGHT = 1.0
+    CHUNK_PHRASE_WEIGHT = 0.25
+    CHUNK_PHRASE_RRF_K = 0
+    CHUNK_PHRASE_PAIR_LIMIT = 16
+    CHUNK_PHRASE_RESULT_LIMIT = 80
+
     def __init__(
         self,
         db_path: Path,
@@ -166,6 +405,14 @@ class SQLiteFTSRetriever:
         document_fts_db: Optional[Path] = None,
         chunk_size: int = 1400,
         chunk_overlap: int = 200,
+        enable_chunk_phrase: bool = True,
+        chunk_phrase_weight: Optional[float] = None,
+        chunk_phrase_pair_limit: Optional[int] = None,
+        chunk_phrase_result_limit: Optional[int] = None,
+        enable_dense: bool = False,
+        dense_model_path: Optional[str] = None,
+        dense_device: Optional[str] = None,
+        dense_checkpoint_every: int = 500,
     ):
         self.db_path = Path(db_path)
         self.use_reranker = use_reranker
@@ -177,6 +424,19 @@ class SQLiteFTSRetriever:
         self.alias_weight = float(alias_weight)
         self.passage_weight = float(passage_weight)
         self.question_weight = float(question_weight)
+        self.enable_chunk_phrase = bool(enable_chunk_phrase)
+        self.chunk_phrase_weight = (
+            float(chunk_phrase_weight) if chunk_phrase_weight is not None
+            else self.CHUNK_PHRASE_WEIGHT
+        )
+        self.chunk_phrase_pair_limit = (
+            int(chunk_phrase_pair_limit) if chunk_phrase_pair_limit is not None
+            else self.CHUNK_PHRASE_PAIR_LIMIT
+        )
+        self.chunk_phrase_result_limit = (
+            int(chunk_phrase_result_limit) if chunk_phrase_result_limit is not None
+            else self.CHUNK_PHRASE_RESULT_LIMIT
+        )
         if max_query_terms <= 0:
             raise ValueError("max_query_terms must be positive")
         self.max_query_terms = int(max_query_terms)
@@ -197,6 +457,24 @@ class SQLiteFTSRetriever:
         self.chunk_size = int(chunk_size)
         self.chunk_overlap = int(chunk_overlap)
         self.tokenizer = VietnameseTokenizer(bigrams=False)
+        self.enable_dense = bool(enable_dense)
+        self.dense_device = dense_device or device or "cuda"
+        self.dense_model_path = dense_model_path
+        self._dense_checkpoint_every = int(dense_checkpoint_every)
+        self._dense: Optional[DenseCache] = None
+        if enable_dense and dense_model_path:
+            self._dense = DenseCache(dense_model_path, device=self.dense_device)
+            # Pre-load embeddings, model, and FAISS index eagerly
+            embeddings_path = db_path.parent / "dense_embeddings"
+            if embeddings_path.with_suffix(".npy").exists():
+                self._dense.load(embeddings_path)
+                # Build FAISS index for fast search
+                import faiss
+                dim = self._dense._embeddings.shape[1]
+                index = faiss.IndexFlatIP(dim)
+                index.add(self._dense._embeddings.astype('float32'))
+                self._dense._index = index
+            self._dense._load_model()
         self.reranker = Reranker(reranker_model, device=device) if use_reranker else None
         self._connection: Optional[sqlite3.Connection] = None
         self._document_connection: Optional[sqlite3.Connection] = None
@@ -385,6 +663,13 @@ class SQLiteFTSRetriever:
                 "base_fusion_weight": self.base_fusion_weight,
                 "or_fusion_weight": self.or_fusion_weight,
                 "retrieval_rrf_k": self.retrieval_rrf_k,
+                "enable_chunk_phrase": self.enable_chunk_phrase,
+                "chunk_phrase_weight": self.chunk_phrase_weight,
+                "chunk_phrase_pair_limit": self.chunk_phrase_pair_limit,
+                "chunk_phrase_result_limit": self.chunk_phrase_result_limit,
+                "enable_dense": self.enable_dense,
+                "dense_model_path": self.dense_model_path,
+                "dense_device": self.dense_device,
                 "chunk_size": self.chunk_size,
                 "chunk_overlap": self.chunk_overlap,
                 "corpus": str(Path(corpus).resolve()),
@@ -409,6 +694,37 @@ class SQLiteFTSRetriever:
         finally:
             connection.close()
         building.replace(self.db_path)
+
+        # ── Dense embedding index ────────────────────────────────────────────
+        if self._dense is not None:
+            dense_manifest: Dict[str, Any] = {}
+            # Collect all chunks we just inserted (we already iterated them above,
+            # so re-stream from corpus to avoid holding them all in RAM).
+            all_chunks: List[Dict[str, Any]] = []
+            for record in iter_contexts(Path(corpus)):
+                doc_id = str(record["id"])
+                passage = record.get("passage")
+                passage = passage if isinstance(passage, str) else ""
+                title = display_title(record)
+                if not passage.strip():
+                    passage = title or f"văn bản {doc_id}"
+                for chunk_id, chunk_text in enumerate(
+                    iter_text_chunks(passage, self.chunk_size, self.chunk_overlap), start=1
+                ):
+                    all_chunks.append({
+                        "doc_id": doc_id,
+                        "chunk_id": f"{doc_id}::chunk::{chunk_id - 1}",
+                        "title": title,
+                        "passage": chunk_text,
+                    })
+            dense_save = self.db_path.parent / "dense_embeddings"
+            checkpoint_every = getattr(self, "_dense_checkpoint_every", 500)
+            print(f"Building dense index for {len(all_chunks)} chunks on {self.dense_device} …", flush=True)
+            build_result = self._dense.build(all_chunks, save_path=dense_save, checkpoint_every=checkpoint_every)
+            print(f"Dense index done in {build_result['seconds']:.1f}s", flush=True)
+            manifest["dense_build"] = build_result
+            manifest["dense_model"] = self.dense_model_path
+
         self._write_config()
         return manifest
 
@@ -424,12 +740,19 @@ class SQLiteFTSRetriever:
             "alias_weight": self.alias_weight,
             "passage_weight": self.passage_weight,
             "question_weight": self.question_weight,
+            "enable_chunk_phrase": self.enable_chunk_phrase,
+            "chunk_phrase_weight": self.chunk_phrase_weight,
+            "chunk_phrase_pair_limit": self.chunk_phrase_pair_limit,
+            "chunk_phrase_result_limit": self.chunk_phrase_result_limit,
             "max_query_terms": self.max_query_terms,
             "or_query_terms": self.or_query_terms,
             "or_chunk_limit": self.or_chunk_limit,
             "base_fusion_weight": self.base_fusion_weight,
             "or_fusion_weight": self.or_fusion_weight,
             "retrieval_rrf_k": self.retrieval_rrf_k,
+            "enable_dense": self.enable_dense,
+            "dense_model_path": self.dense_model_path,
+            "dense_device": self.dense_device,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
         }
@@ -466,6 +789,13 @@ class SQLiteFTSRetriever:
             document_fts_db=document_fts_db,
             chunk_size=config.get("chunk_size", 1400),
             chunk_overlap=config.get("chunk_overlap", 200),
+            enable_chunk_phrase=config.get("enable_chunk_phrase", True),
+            chunk_phrase_weight=config.get("chunk_phrase_weight"),
+            chunk_phrase_pair_limit=config.get("chunk_phrase_pair_limit"),
+            chunk_phrase_result_limit=config.get("chunk_phrase_result_limit"),
+            enable_dense=config.get("enable_dense", False),
+            dense_model_path=config.get("dense_model_path"),
+            dense_device=device or config.get("dense_device"),
         )
 
     def manifest(self) -> Dict[str, Any]:
@@ -1006,6 +1336,100 @@ class SQLiteFTSRetriever:
             key=lambda item: (-float(item["score"]), item["doc_id"]),
         )[: self.top_k_initial]
 
+    def _chunk_phrase_candidates(self, query: str) -> List[Dict[str, Any]]:
+        """Rank documents by bigram phrases found in any chunk of the corpus.
+
+        Complements the document-level phrase retriever by exposing the
+        specific chunk where the phrase lives, which is useful when the
+        document is long (>=chunk_size). The expression, BM25 weights and
+        limit intentionally mirror the validated v3 holdout benchmark so
+        the only variable is the FTS5 table (chunks vs. documents).
+        """
+        if not self.enable_chunk_phrase:
+            return []
+        tokens = list(dict.fromkeys(self.tokenizer.tokenize(query)))
+        if len(tokens) < 2:
+            return []
+        pairs: Sequence[Tuple[str, str]] = list(
+            dict.fromkeys(zip(tokens, tokens[1:]))
+        )[: self.chunk_phrase_pair_limit]
+        expression = " OR ".join(
+            self._quoted_phrase(first, second) for first, second in pairs
+        )
+        try:
+            rows = self.connection.execute(
+                """
+                SELECT doc_id, chunk_id, title,
+                       snippet(chunks, 3, '', '', ' … ', 96) AS evidence,
+                       -bm25(chunks, 0.0, 3.0, 1.0) AS score
+                FROM chunks
+                WHERE chunks MATCH ?
+                ORDER BY bm25(chunks, 0.0, 3.0, 1.0), doc_id, chunk_id
+                LIMIT ?
+                """,
+               (expression, self.chunk_phrase_result_limit),
+            )
+        except sqlite3.OperationalError:
+            return []
+        # Collapse to one row per doc_id while keeping the highest-scoring chunk.
+        unique: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            doc_id = str(row["doc_id"])
+            current = unique.get(doc_id)
+            raw_score = float(row["score"])
+            if current is None or raw_score > float(current["raw_fts_score"]):
+                unique[doc_id] = {
+                    "doc_id": doc_id,
+                    "chunk_id": str(row["chunk_id"]),
+                    "text": "\n".join(
+                        value for value in (row["title"], row["evidence"]) if value
+                    ),
+                    "score": raw_score,
+                    "raw_fts_score": raw_score,
+                    "method": "sqlite_chunk_phrase_fts",
+                }
+        return sorted(
+            unique.values(),
+            key=lambda item: (-float(item["raw_fts_score"]), item["doc_id"]),
+        )[: self.top_k_initial]
+
+    def _fuse_chunk_phrase(
+        self,
+        base_candidates: List[Dict[str, Any]],
+        phrase_candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Fuse the complete v2 ranking with chunk-level phrase RRF (1:0.25, k=0).
+
+        Symmetric with :meth:`_fuse_document_phrase` so the two phrase
+        layers stack on the same base ranking. Phrase weight mirrors the
+        conservative 0.25 chosen on the v3 holdout for document phrases;
+        if both phrase layers are enabled, their additive contribution
+        remains bounded.
+        """
+        if not phrase_candidates:
+            return base_candidates
+        by_id = {item["doc_id"]: dict(item) for item in base_candidates}
+        fused: Dict[str, float] = defaultdict(float)
+        for weight, ranking in (
+            (self.CHUNK_PHRASE_BASE_WEIGHT, base_candidates),
+            (self.CHUNK_PHRASE_WEIGHT, phrase_candidates),
+        ):
+            for rank, item in enumerate(ranking, 1):
+                doc_id = item["doc_id"]
+                fused[doc_id] += weight / (self.CHUNK_PHRASE_RRF_K + rank)
+                if doc_id not in by_id:
+                    by_id[doc_id] = dict(item)
+        for doc_id, score in fused.items():
+            by_id[doc_id]["score"] = score
+            if phrase_candidates and doc_id in {
+                item["doc_id"] for item in phrase_candidates
+            }:
+                by_id[doc_id]["method"] = "sqlite_v2_chunk_phrase_rrf"
+        return sorted(
+            by_id.values(),
+            key=lambda item: (-float(item["score"]), item["doc_id"]),
+        )[: self.top_k_initial]
+
     def retrieve(self, query: str, query_id: str = "", top_k: int = 5) -> QueryResult:
         if not 1 <= top_k <= 5:
             raise ValueError("BTC Task 1 permits 1 to 5 predictions")
@@ -1020,10 +1444,71 @@ class SQLiteFTSRetriever:
         candidates = self._fuse_character_neighbors(query, candidates)
         or_candidates = self._or_bm25_candidates(search_terms)
         candidates = self._fuse_or_bm25(candidates, or_candidates)
+        chunk_phrase_candidates = self._chunk_phrase_candidates(query)
+        candidates = self._fuse_chunk_phrase(candidates, chunk_phrase_candidates)
         document_phrase_candidates = self._document_phrase_candidates(query)
         candidates = self._fuse_document_phrase(
             candidates, document_phrase_candidates
         )
+
+        # ── Dense branch (FAISS GPU search) ─────────────────────────────────────
+        # Use FAISS IndexFlatIP for ultra-fast cosine search on 294K embeddings.
+        # DenseCache.retrieve() handles model loading internally.
+        dense_candidates: Optional[List[Dict[str, Any]]] = None
+        if self._dense is not None:
+            if self._dense._embeddings is None:
+                dense_path = self.db_path.parent / "dense_embeddings"
+                self._dense.load(dense_path)
+            if self._dense._embeddings is not None:
+                # Lazy-build FAISS index
+                if not hasattr(self._dense, "_index") or self._dense._index is None:
+                    import faiss
+                    dim = self._dense._embeddings.shape[1]
+                    index = faiss.IndexFlatIP(dim)
+                    index.add(self._dense._embeddings)
+                    try:
+                        gpu_res = faiss.StandardGpuResources()
+                        self._dense._index = faiss.index_cpu_to_gpu(gpu_res, 0, index)
+                    except Exception:
+                        self._dense._index = index
+
+                # Encode query using the model's retrieve method (handles _load_model)
+                # We call _dense._model directly since DenseCache.retrieve() does it anyway
+                # Use CPU to avoid GPU contention from batch encoding
+                model = self._dense._model
+                if model is None:
+                    from sentence_transformers import SentenceTransformer
+                    model = SentenceTransformer(self._dense.model_path, device="cpu")
+                    self._dense._model = model
+                q_emb = model.encode(
+                    [query], batch_size=1, show_progress_bar=False,
+                    convert_to_numpy=True, normalize_embeddings=True,
+                )[0].astype(np.float32)
+
+                # FAISS search — very fast (~10ms for top-60 on GPU)
+                top_dense = self.top_k_initial
+                scores_arr, indices_arr = self._dense._index.search(q_emb.reshape(1, -1), top_dense)
+
+                # Build dense candidates matching rrf_fuse format
+                dense_candidates = []
+                for idx, score in zip(indices_arr[0], scores_arr[0]):
+                    if idx < 0:
+                        continue
+                    chunk_key = self._dense._chunk_meta[idx]
+                    doc_id = chunk_key.split("::chunk::", 1)[0]
+                    dense_candidates.append({
+                        "doc_id": doc_id,
+                        "chunk_id": chunk_key,
+                        "score": float(score),
+                        "text": "",
+                    })
+                if dense_candidates:
+                    candidates = self._dense.rrf_fuse(
+                        candidates, dense_candidates,
+                        fts_weight=1.0, dense_weight=1.0, rrf_k=60,
+                    )
+
+
         if memory_answers:
             memory_ids = set(memory_answers)
             exact = [{
@@ -1107,10 +1592,23 @@ class SQLiteFTSRetriever:
                     "phrase_weight": self.DOCUMENT_PHRASE_WEIGHT,
                     "rrf_k": self.DOCUMENT_RRF_K,
                 },
+                "chunk_phrase": {
+                    "enabled": self.enable_chunk_phrase,
+                    "candidates": len(chunk_phrase_candidates),
+                    "base_weight": self.CHUNK_PHRASE_BASE_WEIGHT,
+                    "phrase_weight": self.chunk_phrase_weight,
+                    "rrf_k": self.CHUNK_PHRASE_RRF_K,
+                    "pair_limit": self.chunk_phrase_pair_limit,
+                    "result_limit": self.chunk_phrase_result_limit,
+                },
                 "fusion": {
                     "base_weight": self.base_fusion_weight,
                     "or_weight": self.or_fusion_weight,
                     "rrf_k": self.retrieval_rrf_k,
+                },
+                "dense": {
+                    "enabled": self.enable_dense,
+                    "candidates": len(dense_candidates) if dense_candidates is not None else 0,
                 },
             },
         )

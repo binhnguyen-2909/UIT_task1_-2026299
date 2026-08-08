@@ -79,6 +79,7 @@ def _build_retriever(args: argparse.Namespace) -> Any:
     if args.backend == "sqlite":
         db_path = Path(args.index_dir) / "legalir.sqlite3"
         use_reranker = bool(args.reranker_model) and not args.no_reranker
+        enable_dense = bool(getattr(args, "dense_model", None))
         retriever = SQLiteFTSRetriever(
             db_path=db_path,
             use_reranker=use_reranker,
@@ -99,12 +100,26 @@ def _build_retriever(args: argparse.Namespace) -> Any:
             document_fts_db=getattr(args, "document_fts_db", None),
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
+            enable_chunk_phrase=not args.no_chunk_phrase,
+            chunk_phrase_weight=args.chunk_phrase_weight,
+            chunk_phrase_pair_limit=args.chunk_phrase_pair_limit,
+            chunk_phrase_result_limit=args.chunk_phrase_result_limit,
+            enable_dense=enable_dense,
+            dense_model_path=getattr(args, "dense_model", None),
+            dense_device=getattr(args, "dense_device", "cuda"),
+            dense_checkpoint_every=getattr(args, "dense_checkpoint_every", 500),
         )
         manifest = retriever.build(Path(args.corpus), train_data=args.train_data)
         LOGGER.info(
             "Built SQLite FTS5 index with %d documents in %.1fs",
             manifest["documents"], manifest["build_seconds"],
         )
+        if enable_dense:
+            LOGGER.info(
+                "Built dense embeddings for %d chunks in %.1fs",
+                manifest.get("dense_build", {}).get("chunks", "?"),
+                manifest.get("dense_build", {}).get("seconds", "?"),
+            )
         return retriever
 
     try:
@@ -338,6 +353,34 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--no-reranker", action="store_true")
     parser.add_argument("--query-expansion", action="store_true")
+    parser.add_argument(
+        "--no-chunk-phrase", action="store_true",
+        help="Disable chunk-level phrase FTS (default ON; matches v6 backend)",
+    )
+    parser.add_argument(
+        "--chunk-phrase-weight", type=float, default=None,
+        help="Override chunk-phrase RRF weight (default 0.25 from v3 holdout)",
+    )
+    parser.add_argument(
+        "--chunk-phrase-pair-limit", type=int, default=None,
+        help="Max number of bigram pairs to query (default 16)",
+    )
+    parser.add_argument(
+        "--chunk-phrase-result-limit", type=int, default=None,
+        help="Max number of chunks to fetch from chunk phrase FTS (default 80)",
+    )
+    parser.add_argument(
+        "--dense-model", type=str, default=None,
+        help="Path to local SentenceTransformer embedding model (enables dense branch)",
+    )
+    parser.add_argument(
+        "--dense-device", type=str, default="cuda",
+        help="Device for dense embedding (default cuda, use cpu if no GPU)",
+    )
+    parser.add_argument(
+        "--dense-checkpoint-every", type=int, default=500,
+        help="Save checkpoint every N batches during dense index build (default 500, ~every 40 min on GPU)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
