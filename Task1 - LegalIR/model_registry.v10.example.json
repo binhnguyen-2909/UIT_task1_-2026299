@@ -1,0 +1,25 @@
+{
+  "parameter_limit": 4000000000,
+  "models": [
+    {
+      "id": "bqbbao6/vietnamese-legal-embedding",
+      "component": "embedding",
+      "local_path": "../models/bqbbao6_vietnamese-legal-embedding",
+      "parameters": 330000000,
+      "license": "MIT",
+      "registered": true,
+      "btc_approved": true,
+      "approval_evidence": "BTC Task 1 approved model list"
+    },
+    {
+      "id": "thanhtantran/Vietnamese_Reranker",
+      "component": "reranker",
+      "local_path": "../models/thanhtantran_Vietnamese_Reranker",
+      "parameters": 760000000,
+      "license": "Apache-2.0",
+      "registered": true,
+      "btc_approved": true,
+      "approval_evidence": "BTC Task 1 approved model list"
+    }
+  ]
+}

@@ -35,6 +35,8 @@ htmlcov/
 
 # Submission output sidecars (JSON review copies; keep only the ZIP)
 Task*/output/*.json
+Task1 - LegalIR/output/*.zip
+!Task1 - LegalIR/output/public_submission_v10_ce_rrf_top35.zip
 
 # Audit/benchmark reports that can be re-generated from scripts
 **/reports/v3_*.json

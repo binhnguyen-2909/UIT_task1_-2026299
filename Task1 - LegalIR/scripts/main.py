@@ -32,8 +32,8 @@ if str(COMMON_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(COMMON_SCRIPTS))
 from model_policy import validate_model_plan  # noqa: E402
 
-DEFAULT_INDEX = TASK_ROOT / "data" / "processed" / "public_index"
-DEFAULT_OUTPUT = TASK_ROOT / "output" / "submission.zip"
+DEFAULT_INDEX = TASK_ROOT / "data" / "processed" / "v10_index"
+DEFAULT_OUTPUT = TASK_ROOT / "output" / "public_submission_v10_ce_rrf_top35.zip"
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
 
@@ -67,23 +67,49 @@ def _write_bundle(submission: Dict[str, Any], output: Path) -> None:
 
 
 def _build_retriever(args: argparse.Namespace) -> Any:
-    if args.backend == "sqlite" and args.embedding_model:
-        raise ValueError("--embedding-model is only supported by --backend hybrid")
+    embedding_model = args.embedding_model
+    if embedding_model:
+        embedding_model = str(Path(embedding_model).resolve())
+    reranker_model = (
+        str(Path(args.reranker_model).resolve())
+        if args.reranker_model else None
+    )
     validate_model_plan(
         args.model_registry,
         {
-            "embedding": args.embedding_model,
-            "reranker": None if args.no_reranker else args.reranker_model,
+            "embedding": embedding_model,
+            "reranker": None if args.no_reranker else reranker_model,
         },
     )
     if args.backend == "sqlite":
         db_path = Path(args.index_dir) / "legalir.sqlite3"
-        use_reranker = bool(args.reranker_model) and not args.no_reranker
-        enable_dense = bool(getattr(args, "dense_model", None))
+        if args.reuse_index and db_path.is_file():
+            config_path = db_path.with_suffix(".config.json")
+            if not config_path.is_file():
+                raise FileNotFoundError(
+                    f"Existing SQLite index has no configuration: {config_path}"
+                )
+            existing = json.loads(config_path.read_text(encoding="utf-8"))
+            # These values describe rows already persisted in SQLite.  Reusing
+            # the index must never relabel fixed chunks as legal chunks (or use
+            # different sizes) merely because CLI defaults changed.
+            args.chunk_size = int(existing.get("chunk_size", args.chunk_size))
+            args.chunk_overlap = int(existing.get("chunk_overlap", args.chunk_overlap))
+            args.chunk_strategy = str(existing.get("chunk_strategy", "fixed"))
+        use_reranker = bool(reranker_model) and not args.no_reranker
+        enable_dense = bool(embedding_model)
+        embedding_key = str(embedding_model or "").casefold()
+        query_prefix = args.embedding_query_prefix
+        passage_prefix = args.embedding_passage_prefix
+        if "bqbbao6" in embedding_key or "vietnamese-legal-embedding" in embedding_key:
+            query_prefix = "query: " if query_prefix is None else query_prefix
+            passage_prefix = "passage: " if passage_prefix is None else passage_prefix
+        query_prefix = query_prefix or ""
+        passage_prefix = passage_prefix or ""
         retriever = SQLiteFTSRetriever(
             db_path=db_path,
             use_reranker=use_reranker,
-            reranker_model=None if args.no_reranker else args.reranker_model,
+            reranker_model=None if args.no_reranker else reranker_model,
             device=args.device,
             top_k_initial=args.candidates,
             use_query_expansion=args.query_expansion,
@@ -100,16 +126,39 @@ def _build_retriever(args: argparse.Namespace) -> Any:
             document_fts_db=getattr(args, "document_fts_db", None),
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
+            chunk_strategy=args.chunk_strategy,
             enable_chunk_phrase=not args.no_chunk_phrase,
             chunk_phrase_weight=args.chunk_phrase_weight,
             chunk_phrase_pair_limit=args.chunk_phrase_pair_limit,
             chunk_phrase_result_limit=args.chunk_phrase_result_limit,
             enable_dense=enable_dense,
-            dense_model_path=getattr(args, "dense_model", None),
+            dense_model_path=embedding_model,
             dense_device=getattr(args, "dense_device", "cuda"),
-            dense_checkpoint_every=getattr(args, "dense_checkpoint_every", 500),
+            dense_checkpoint_every=getattr(args, "dense_checkpoint_every", 2000),
+            dense_batch_size=args.dense_batch_size,
+            dense_max_seq_length=args.dense_max_seq_length,
+            dense_query_prefix=query_prefix,
+            dense_passage_prefix=passage_prefix,
+            dense_weight=args.dense_weight,
+            dense_rrf_k=args.dense_rrf_k,
+            question_dense_weight=args.question_dense_weight,
+            question_dense_rrf_k=args.question_dense_rrf_k,
+            question_dense_candidates=args.question_dense_candidates,
+            rerank_candidates=args.rerank_candidates,
+            rerank_passages_per_doc=args.rerank_passages_per_doc,
+            reranker_batch_size=args.reranker_batch_size,
+            reranker_max_length=args.reranker_max_length,
+            reranker_rrf_weight=args.reranker_rrf_weight,
+            reranker_rrf_k=args.reranker_rrf_k,
         )
-        manifest = retriever.build(Path(args.corpus), train_data=args.train_data)
+        if args.reuse_index:
+            if not db_path.is_file():
+                raise FileNotFoundError(
+                    f"--reuse-index requested but SQLite index does not exist: {db_path}"
+                )
+            manifest = retriever.build_dense_from_index()
+        else:
+            manifest = retriever.build(Path(args.corpus), train_data=args.train_data)
         LOGGER.info(
             "Built SQLite FTS5 index with %d documents in %.1fs",
             manifest["documents"], manifest["build_seconds"],
@@ -122,29 +171,7 @@ def _build_retriever(args: argparse.Namespace) -> Any:
             )
         return retriever
 
-    try:
-        from .corpus_loader import LegalCorpusLoader
-        from .pipeline import HybridRetriever
-    except ImportError:
-        from corpus_loader import LegalCorpusLoader
-        from pipeline import HybridRetriever
-    loader = LegalCorpusLoader(Path(args.corpus))
-    documents = loader.load_corpus()
-    chunks = loader.chunk_documents(documents, args.chunk_size, args.chunk_overlap)
-    retriever = HybridRetriever(
-        bm25_weight=args.bm25_weight,
-        dense_weight=args.dense_weight,
-        use_reranker=not args.no_reranker,
-        use_query_expansion=args.query_expansion,
-        top_k_initial=args.candidates,
-        top_k_final=args.top_k,
-        embedding_model=args.embedding_model,
-        reranker_model=None if args.no_reranker else args.reranker_model,
-        device=args.device,
-    )
-    retriever.index_documents(chunks, Path(args.index_dir))
-    LOGGER.info("Indexed %d contexts as %d chunks", len(documents), len(chunks))
-    return retriever
+    raise ValueError("v10 supports only the SQLite backend")
 
 
 def command_train(args: argparse.Namespace) -> int:
@@ -159,30 +186,37 @@ def command_infer(args: argparse.Namespace) -> int:
     elif index.joinpath("legalir.sqlite3").exists():
         db_path = index / "legalir.sqlite3"
         saved = json.loads(db_path.with_suffix(".config.json").read_text(encoding="utf-8"))
+        reranker_override = (
+            str(Path(args.reranker_model).resolve())
+            if args.reranker_model and not args.no_reranker else None
+        )
+        selected_reranker = (
+            None if args.no_reranker
+            else (reranker_override or saved.get("reranker_model"))
+        )
         validate_model_plan(
             args.model_registry,
-            {"embedding": None, "reranker": saved.get("reranker_model")},
+            {
+                "embedding": None if args.disable_dense else saved.get("dense_model_path"),
+                "reranker": selected_reranker,
+            },
         )
         retriever = SQLiteFTSRetriever.load(
             db_path,
             device=args.device,
             document_fts_db=args.document_fts_db,
+            reranker_model=reranker_override,
+            disable_reranker=args.no_reranker,
+            disable_dense=args.disable_dense,
+            rerank_candidates=args.rerank_candidates,
+            rerank_passages_per_doc=args.rerank_passages_per_doc,
+            reranker_batch_size=args.reranker_batch_size,
+            reranker_max_length=args.reranker_max_length,
+            reranker_rrf_weight=args.reranker_rrf_weight,
+            reranker_rrf_k=args.reranker_rrf_k,
         )
-    elif index.joinpath("config.json").exists():
-        try:
-            from .pipeline import HybridRetriever
-        except ImportError:
-            from pipeline import HybridRetriever
-        saved = json.loads(index.joinpath("config.json").read_text(encoding="utf-8"))
-        validate_model_plan(
-            args.model_registry,
-            {"embedding": saved.get("embedding_model"), "reranker": saved.get("reranker_model")},
-        )
-        retriever = HybridRetriever.load(index, device=args.device)
     else:
-        raise FileNotFoundError("No index found; provide --corpus to build one")
-    if args.document_fts_db and not isinstance(retriever, SQLiteFTSRetriever):
-        raise ValueError("--document-fts-db requires the SQLite backend")
+        raise FileNotFoundError("No SQLite index found; provide --corpus to build one")
     evaluator = LegalIREvaluator(retriever)
     input_path = Path(args.input)
     input_hash = hashlib.sha256(input_path.read_bytes()).hexdigest()
@@ -194,6 +228,13 @@ def command_infer(args: argparse.Namespace) -> int:
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "backend": retriever.BACKEND,
+            "embedding_model": retriever.dense_model_path,
+            "reranker_model": retriever.reranker_model,
+            "rerank_candidates": retriever.rerank_candidates,
+            "rerank_passages_per_doc": retriever.rerank_passages_per_doc,
+            "reranker_max_length": retriever.reranker_max_length,
+            "reranker_rrf_weight": retriever.reranker_rrf_weight,
+            "reranker_rrf_k": retriever.reranker_rrf_k,
         }
         if retriever.document_fts_db is not None:
             document_stat = retriever.document_fts_db.stat()
@@ -238,7 +279,7 @@ def command_infer(args: argparse.Namespace) -> int:
     audit = {
         "input": str(Path(args.input).resolve()),
         "output": str(Path(args.output).resolve()),
-        "backend": getattr(retriever, "BACKEND", "hybrid"),
+        "backend": getattr(retriever, "BACKEND", "sqlite"),
         "document_fts": (
             retriever.document_fts_info()
             if isinstance(retriever, SQLiteFTSRetriever)
@@ -321,19 +362,31 @@ def command_variants(args: argparse.Namespace) -> int:
 
 
 def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = False) -> None:
-    parser.add_argument(
-        "--backend", choices=("sqlite", "hybrid"), default="sqlite",
-        help="sqlite streams the official corpus to disk; hybrid is for small experiments",
-    )
+    parser.set_defaults(backend="sqlite")
     parser.add_argument("--corpus", type=Path, required=corpus_required)
     parser.add_argument("--train-data", type=Path, help="Optional labelled data for aliases/exact memory")
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX)
+    parser.add_argument(
+        "--reuse-index", action="store_true",
+        help="For train: keep an existing SQLite index and build only the dense cache",
+    )
     parser.add_argument("--chunk-size", type=int, default=1200)
     parser.add_argument("--chunk-overlap", type=int, default=150)
-    parser.add_argument("--candidates", type=int, default=40)
+    parser.add_argument(
+        "--chunk-strategy",
+        choices=("legal", "fixed"),
+        default="fixed",
+        help="legal preserves article/section/item context; fixed uses fixed-size chunks",
+    )
+    parser.add_argument(
+        "--candidates", type=int, default=100,
+        help="Lexical/dense candidate pool before final top-k (100 is tuned for the neural branch)",
+    )
     parser.add_argument("--top-k", type=int, choices=range(1, 6), default=5)
-    parser.add_argument("--bm25-weight", type=float, default=1.0)
-    parser.add_argument("--dense-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--dense-weight", type=float, default=0.05,
+        help="Small dense RRF weight; tuned on the leak-free Task1 holdout",
+    )
     parser.add_argument("--title-weight", type=float, default=3.0)
     parser.add_argument("--alias-weight", type=float, default=2.0)
     parser.add_argument("--passage-weight", type=float, default=1.0)
@@ -348,6 +401,16 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
     parser.add_argument("--or-fusion-weight", type=float, default=7.0)
     parser.add_argument("--retrieval-rrf-k", type=int, default=20)
     parser.add_argument("--embedding-model", help="Downloaded local model directory only")
+    parser.add_argument(
+        "--embedding-query-prefix",
+        default=None,
+        help="Optional prefix for dense queries; auto uses 'query: ' for bqbbao6 legal embedding",
+    )
+    parser.add_argument(
+        "--embedding-passage-prefix",
+        default=None,
+        help="Optional prefix for dense passages; auto uses 'passage: ' for bqbbao6 legal embedding",
+    )
     parser.add_argument("--reranker-model", help="Downloaded local model directory only")
     parser.add_argument("--model-registry", type=Path, help="Completed BTC-approved model registry JSON")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -355,7 +418,7 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
     parser.add_argument("--query-expansion", action="store_true")
     parser.add_argument(
         "--no-chunk-phrase", action="store_true",
-        help="Disable chunk-level phrase FTS (default ON; matches v6 backend)",
+        help="Disable chunk-level phrase FTS (enabled in v10)",
     )
     parser.add_argument(
         "--chunk-phrase-weight", type=float, default=None,
@@ -370,16 +433,64 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
         help="Max number of chunks to fetch from chunk phrase FTS (default 80)",
     )
     parser.add_argument(
-        "--dense-model", type=str, default=None,
-        help="Path to local SentenceTransformer embedding model (enables dense branch)",
+        "--disable-dense", action="store_true",
+        help="Ignore a saved dense branch (useful when its verified cache is unavailable)",
     )
     parser.add_argument(
-        "--dense-device", type=str, default="cuda",
-        help="Device for dense embedding (default cuda, use cpu if no GPU)",
+        "--dense-device", type=str, default="auto",
+        help="Device for dense embedding (default auto; use cpu to force CPU)",
     )
     parser.add_argument(
-        "--dense-checkpoint-every", type=int, default=500,
-        help="Save checkpoint every N batches during dense index build (default 500, ~every 40 min on GPU)",
+        "--dense-checkpoint-every", type=int, default=2000,
+        help="Save checkpoint every N batches during dense index build",
+    )
+    parser.add_argument(
+        "--dense-batch-size", type=int, default=16,
+        help="Embedding batch size; 16 is a safe RTX 3050 default",
+    )
+    parser.add_argument(
+        "--dense-max-seq-length", type=int, default=384,
+        help="Maximum embedding tokens; lower this if GPU memory is insufficient",
+    )
+    parser.add_argument(
+        "--dense-rrf-k", type=int, default=60,
+        help="RRF constant for the dense/lexical fusion",
+    )
+    parser.add_argument(
+        "--question-dense-weight", type=float, default=0.02,
+        help="Small RRF weight for labelled train-question neighbors",
+    )
+    parser.add_argument(
+        "--question-dense-rrf-k", type=int, default=60,
+        help="RRF constant for train-question neighbor fusion",
+    )
+    parser.add_argument(
+        "--question-dense-candidates", type=int, default=20,
+        help="Number of nearest labelled train questions used for recall expansion",
+    )
+    parser.add_argument(
+        "--rerank-candidates", type=int, default=35,
+        help="Number of fused candidates sent to the v10 cross-encoder",
+    )
+    parser.add_argument(
+        "--rerank-passages-per-doc", type=int, default=2,
+        help="Query-focused passages scored per candidate document",
+    )
+    parser.add_argument(
+        "--reranker-batch-size", type=int, default=16,
+        help="Cross-encoder batch size used by v10 on an RTX 3050 6 GB",
+    )
+    parser.add_argument(
+        "--reranker-max-length", type=int, default=None,
+        help="Optional transformer sequence cap; 256 is a fast public-test setting",
+    )
+    parser.add_argument(
+        "--reranker-rrf-weight", type=float, default=0.8,
+        help="v10 neural rank weight in lexical/neural RRF",
+    )
+    parser.add_argument(
+        "--reranker-rrf-k", type=int, default=5,
+        help="v10 RRF constant for lexical/neural reranking",
     )
 
 

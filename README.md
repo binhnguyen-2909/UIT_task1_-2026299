@@ -22,7 +22,7 @@ python -m unittest discover -s tests -v
 python scripts\verify_submissions.py --task 1
 ```
 
-Lệnh trên kiểm tra submission Task 1 v4 hiện có. Khi có public input thật, truyền thêm `--task1-input` để validator kiểm tra đúng question ID. Task 2 hiện chỉ là scaffold/code nền và chưa có kết luận từ public test.
+Lệnh trên kiểm tra submission Task 1 v10 hiện có. Khi có public input thật, truyền thêm `--task1-input` để validator kiểm tra đúng question ID. Task 2 hiện chỉ là scaffold/code nền và chưa có kết luận từ public test.
 
 ## Cấu trúc chính
 
@@ -40,4 +40,4 @@ Corpus `selected-contexts.zip`, các file `train.json`/`public-official.json`/`p
 
 File overview của Task 2 được giữ lại tại `Task2 - LegalQA/DSC2026_Task2_LegalQA_Data_Overview.docx`; file này mô tả schema `context_*.json` gồm `id`, `name`, `link`, `passage` và cách chấm METEOR/ROUGE-L.
 
-Submission mới nhất của Task 1 nằm ở `Task1 - LegalIR/output/public_submission_v4_chunkphrase.zip`. Không dùng `Task2/output/submission.zip` để báo cáo public-test score.
+Submission tốt nhất hiện tại của Task 1 nằm ở `Task1 - LegalIR/output/public_submission_v10_ce_rrf_top35.zip` (`Recall = 0.8871`, `Precision = 0.1900`). Không dùng `Task2/output/submission.zip` để báo cáo public-test score.

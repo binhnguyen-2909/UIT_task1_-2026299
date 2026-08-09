@@ -19,6 +19,45 @@ def _tokens(text: str) -> List[str]:
     return TOKEN_RE.findall(unicodedata.normalize("NFC", str(text)).casefold())
 
 
+def reciprocal_rank_fuse(
+    lexical: List[Dict[str, Any]],
+    neural: List[Dict[str, Any]],
+    neural_weight: float = 0.1,
+    rrf_k: int = 0,
+    top_k: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Fuse lexical and neural ranks while preserving neural audit fields."""
+
+    if neural_weight < 0 or rrf_k < 0:
+        raise ValueError("RRF weight and k must be non-negative")
+    lexical_rank = {
+        str(item["doc_id"]): rank for rank, item in enumerate(lexical, 1)
+    }
+    neural_rank = {
+        str(item["doc_id"]): rank for rank, item in enumerate(neural, 1)
+    }
+    universe = list(dict.fromkeys([*lexical_rank, *neural_rank]))
+    by_id = {str(item["doc_id"]): dict(item) for item in lexical}
+    by_id.update({str(item["doc_id"]): dict(item) for item in neural})
+    missing_rank = len(universe) + 1
+    for doc_id in universe:
+        by_id[doc_id]["rerank_fusion_score"] = (
+            1.0 / (rrf_k + lexical_rank.get(doc_id, missing_rank))
+            + neural_weight / (rrf_k + neural_rank.get(doc_id, missing_rank))
+        )
+    output = sorted(
+        by_id.values(),
+        key=lambda item: (
+            -float(item["rerank_fusion_score"]),
+            lexical_rank.get(str(item["doc_id"]), missing_rank),
+            str(item["doc_id"]),
+        ),
+    )
+    for rank, item in enumerate(output, 1):
+        item["rank"] = rank
+    return output[:top_k] if top_k is not None else output
+
+
 class LegalRelevanceFeatures:
     """Feature helper used by the fallback and by audit output."""
 
@@ -46,12 +85,15 @@ class Reranker:
         model_name: Optional[str] = None,
         device: Optional[str] = None,
         batch_size: int = 16,
+        max_length: Optional[int] = None,
     ):
         self.model_name = model_name
         self.batch_size = int(batch_size)
+        self.max_length = int(max_length) if max_length is not None else None
         self.device = None if device in (None, "auto") else device
         self.use_fallback = model_name is None
         self.model: Any = None
+        self.last_trace: Optional[Dict[str, Any]] = None
         if not self.use_fallback:
             model_path = Path(str(model_name))
             if not model_path.exists():
@@ -62,32 +104,80 @@ class Reranker:
                 from sentence_transformers import CrossEncoder
             except ImportError as exc:
                 raise RuntimeError("Install sentence-transformers to use the reranker") from exc
-            self.model = CrossEncoder(
-                str(model_path), device=self.device, local_files_only=True
-            )
+            model_kwargs: Dict[str, Any] = {
+                "device": self.device,
+                "local_files_only": True,
+            }
+            if self.max_length is not None:
+                if self.max_length <= 0:
+                    raise ValueError("max_length must be positive")
+                model_kwargs["max_length"] = self.max_length
+            self.model = CrossEncoder(str(model_path), **model_kwargs)
 
     def rerank(self, query: str, candidates: List[Dict[str, Any]], top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         if not candidates:
+            self.last_trace = {
+                "input_ids": [],
+                "neural_ids": [],
+                "neural_scores": {},
+            }
             return []
         output = [dict(candidate) for candidate in candidates]
+        input_ids = [str(candidate["doc_id"]) for candidate in output]
         if self.use_fallback:
             scores = []
             for candidate in output:
-                features = LegalRelevanceFeatures.compute(query, str(candidate["text"]))
+                passages = candidate.get("passages") or [str(candidate["text"])]
                 base_score = float(candidate.get("score", 0.0))
-                score = (
-                    0.65 * features["token_recall"]
-                    + 0.20 * features["reference_match"]
-                    + 0.05 * features["phrase_match"]
-                    + 0.10 * math.tanh(base_score)
-                )
+                passage_scores = []
+                passage_features = []
+                for passage in passages:
+                    features = LegalRelevanceFeatures.compute(query, str(passage))
+                    passage_features.append(features)
+                    passage_scores.append(
+                        0.65 * features["token_recall"]
+                        + 0.20 * features["reference_match"]
+                        + 0.05 * features["phrase_match"]
+                        + 0.10 * math.tanh(base_score)
+                    )
+                best_index = max(range(len(passage_scores)), key=passage_scores.__getitem__)
+                score = passage_scores[best_index]
+                features = passage_features[best_index]
+                candidate["text"] = str(passages[best_index])
+                candidate["rerank_passage_index"] = best_index
                 candidate["rerank_features"] = features
                 scores.append(score)
         else:
-            pairs = [(query, str(candidate["text"])) for candidate in output]
-            scores = [float(value) for value in self.model.predict(
+            pairs = []
+            owners = []
+            passages_by_candidate = []
+            for candidate_index, candidate in enumerate(output):
+                passages = [
+                    str(value)
+                    for value in (
+                        candidate.get("passages") or [candidate.get("text", "")]
+                    )
+                ]
+                passages_by_candidate.append(passages)
+                for passage in passages:
+                    pairs.append((query, passage))
+                    owners.append(candidate_index)
+            flat_scores = [float(value) for value in self.model.predict(
                 pairs, batch_size=self.batch_size, show_progress_bar=False
             )]
+            scores = [float("-inf")] * len(output)
+            best_indices = [0] * len(output)
+            passage_positions = [0] * len(output)
+            for owner, score in zip(owners, flat_scores):
+                position = passage_positions[owner]
+                passage_positions[owner] += 1
+                if score > scores[owner]:
+                    scores[owner] = score
+                    best_indices[owner] = position
+            for candidate_index, candidate in enumerate(output):
+                best_index = best_indices[candidate_index]
+                candidate["text"] = passages_by_candidate[candidate_index][best_index]
+                candidate["rerank_passage_index"] = best_index
 
         for candidate, score in zip(output, scores):
             candidate["rerank_score"] = float(score)
@@ -101,6 +191,14 @@ class Reranker:
         )
         for rank, candidate in enumerate(output, 1):
             candidate["rank"] = rank
+        self.last_trace = {
+            "input_ids": input_ids,
+            "neural_ids": [str(candidate["doc_id"]) for candidate in output],
+            "neural_scores": {
+                str(candidate["doc_id"]): float(candidate["rerank_score"])
+                for candidate in output
+            },
+        }
         return output[:top_k] if top_k is not None else output
 
     def fit(self, *_: Any, **__: Any) -> "Reranker":

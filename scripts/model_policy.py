@@ -10,6 +10,33 @@ from typing import Dict, Iterable, Optional
 PARAMETER_LIMIT = 4_000_000_000
 
 
+def _registered_path_candidates(registry_path: Path, value: str) -> list[Path]:
+    """Resolve registry paths written either from repo root or registry dir.
+
+    Older local registries used ``models/foo`` while living inside ``models/``;
+    resolving only relative to the registry directory turned that into
+    ``models/models/foo``. Keep both conventions valid, but still require the
+    selected path to be an existing local directory.
+    """
+    path = Path(value)
+    if path.is_absolute():
+        return [path]
+    registry_path = registry_path.resolve()
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        registry_path.parent / path,
+        registry_path.parent.parent / path,
+        repo_root / path,
+        Path.cwd() / path,
+    ]
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
+
+
 def validate_model_plan(
     registry_path: Optional[Path],
     selected: Dict[str, Optional[str]],
@@ -32,7 +59,6 @@ def validate_model_plan(
         raise ValueError("Model registry must contain a 'models' list")
 
     selected_records = []
-    registry_base = registry_path.resolve().parent
     for component, local_path in active.items():
         resolved = Path(str(local_path)).resolve()
         if not resolved.is_dir():
@@ -41,11 +67,29 @@ def validate_model_plan(
         for record in records:
             if not isinstance(record, dict) or record.get("component") != component:
                 continue
-            registered_path = Path(str(record.get("local_path", "")))
-            if not registered_path.is_absolute():
-                registered_path = registry_base / registered_path
-            if registered_path.resolve() == resolved:
+            registered_value = str(record.get("local_path", ""))
+            candidates = _registered_path_candidates(registry_path, registered_value)
+            if any(candidate == resolved for candidate in candidates):
                 matches.append(record)
+        if not matches:
+            marker_path = resolved / "derived_model.json"
+            if marker_path.is_file():
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                if marker.get("schema") != 1 or marker.get("component") != component:
+                    raise ValueError(
+                        f"Invalid derived model provenance for {component}: {marker_path}"
+                    )
+                base_model_id = marker.get("base_model_id")
+                training_method = marker.get("training_method")
+                if not isinstance(training_method, str) or not training_method.strip():
+                    raise ValueError(f"Derived model is missing training_method: {marker_path}")
+                matches = [
+                    record
+                    for record in records
+                    if isinstance(record, dict)
+                    and record.get("component") == component
+                    and record.get("id") == base_model_id
+                ]
         if len(matches) != 1:
             raise ValueError(f"{component} model is not uniquely registered: {resolved}")
         record = matches[0]

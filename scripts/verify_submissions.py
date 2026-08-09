@@ -51,7 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task1-submission",
         type=Path,
-        default=REPO_ROOT / "Task1 - LegalIR" / "output" / "public_submission_v4_chunkphrase.zip",
+        default=(
+            REPO_ROOT
+            / "Task1 - LegalIR"
+            / "output"
+            / "public_submission_v10_ce_rrf_top35.zip"
+        ),
     )
     parser.add_argument(
         "--task2-submission",

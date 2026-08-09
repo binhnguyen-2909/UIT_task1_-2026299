@@ -11,7 +11,7 @@ Ví dụ:
 ```powershell
 python scripts\official_round_analyzer.py --mode corpus --corpus "D:\data\selected-contexts.zip"
 python scripts\verify_submissions.py --task 1 `
-  --task1-submission "Task1 - LegalIR\output\public_submission_v4_chunkphrase.zip" `
+  --task1-submission "Task1 - LegalIR\output\public_submission_v10_ce_rrf_top35.zip" `
   --task1-input "D:\data\public-official.json"
 python scripts\verify_submissions.py --task 2 `
   --task2-submission "Task2 - LegalQA\output\submission.zip" `

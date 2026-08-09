@@ -1,145 +1,84 @@
 # Public-test handoff — UIT DSC 2026 LegalIR
 
-## Phạm vi hiện tại
+## Trạng thái hiện tại
 
-Handoff này tập trung vào **Task 1 — LegalIR**. Submission tốt nhất hiện tại là v4 chunk-phrase với `Recall@5 = 0.8253`:
+Task 1 đang dùng duy nhất pipeline **v10**. Kết quả public đã xác nhận:
+
+| Recall | Precision |
+|---:|---:|
+| **0.8871** | **0.1900** |
+
+File nộp đã chấm:
 
 ```text
-Task1 - LegalIR/output/public_submission_v4_chunkphrase.zip
+Task1 - LegalIR/output/public_submission_v10_ce_rrf_top35.zip
 ```
 
-Task 2 mới dừng ở code/scaffold và chưa được đánh giá trên public test. Không dùng artifact hoặc điểm Task 2 để kết luận chất lượng public hiện tại.
+SHA-256:
 
-## 1. Contract của BTC
-
-Corpus chính thức gồm nhiều `context_*.json`:
-
-```json
-{
-  "id": 740,
-  "name": "Tên văn bản",
-  "link": "...",
-  "passage": "Nội dung pháp luật..."
-}
+```text
+b7bf4365b6d1486356987c835013435580c702594fb23ed9cab4193fde954000
 ```
 
-Public input:
+Các pipeline và artifact v4–v9 đã được loại khỏi workspace để tránh chạy nhầm. Task 2 không thuộc phạm vi handoff này.
 
-```json
-{
-  "question_id": {
-    "question": "Câu hỏi..."
-  }
-}
-```
-
-Task 1 submission:
-
-```json
-{
-  "question_id": {
-    "answer": ["740"]
-  }
-}
-```
-
-Invariant trước khi upload:
-
-1. Tập question ID phải khớp chính xác input.
-2. Mỗi answer có 1–5 document ID dạng string và không duplicate.
-3. ZIP chỉ có đúng một file `submission.json` ở root.
-4. Chỉ output ID BTC; không thay bằng URL, số hiệu luật hoặc ID tự tạo.
-
-Task 1 dùng Recall làm metric chính và Precision làm metric phụ/tie-break.
-
-## 2. Pipeline v4
+## Pipeline production
 
 ```text
 Question
-  ├─ Exact memory từ train data
-  ├─ BM25 chunk FTS5
-  │    ├─ focused token query
-  │    ├─ OR query để mở rộng recall
-  │    └─ chunk-phrase RRF
-  ├─ document phrase FTS5
-  └─ RRF fusion → collapse theo document → unique top-5 IDs
+  -> SQLite FTS5/BM25 + phrase/legal signals
+  -> dense passage + dense train-question retrieval
+  -> RRF candidate fusion (100 documents)
+  -> thanhtantran/Vietnamese_Reranker (top 35, 2 passages/document)
+  -> lexical/neural RRF
+  -> 5 unique document_id
 ```
 
-Backend production là SQLite FTS5. Public v4 dùng chunk 1.400 ký tự, overlap 200, candidate pool 40 và phrase search theo bigram 2–4 token. Tất cả chạy offline; không gọi API và không tự tải model.
+Hai model được dùng:
 
-## 3. Tái tạo
+- `bqbbao6/vietnamese-legal-embedding` — 330M parameters;
+- `thanhtantran/Vietnamese_Reranker` — 760M parameters.
 
-Corpus và input BTC là local-only. Đặt chúng ngoài repository, ví dụ `D:\data`:
+Tổng khai báo là 1.09B parameters, dưới giới hạn 4B. Model chỉ được load từ local path và phải khớp `Task1 - LegalIR/model_registry.v10.example.json`.
 
-```powershell
-cd "D:\projects\UIT DSC\Task1 - LegalIR"
+## Chạy và tái tạo
 
-python scripts\main.py train `
-  --backend sqlite `
-  --corpus "D:\data\selected-contexts.zip" `
-  --train-data "D:\data\train.json" `
-  --index-dir "data\processed\public_index" `
-  --chunk-size 1400 `
-  --chunk-overlap 200 `
-  --candidates 40
+Toàn bộ data layout, lệnh build index, lệnh inference, cấu hình v10, resume và troubleshooting nằm tại:
 
-python scripts\main.py infer `
-  --index-dir "data\processed\public_index" `
-  --input "D:\data\public-official.json" `
-  --output "output\public_submission_v4_chunkphrase.zip" `
-  --top-k 5 `
-  --checkpoint-every 10
+```text
+Task1 - LegalIR/README.md
 ```
 
-Nếu có reference/warmup tương ứng, chạy local metric:
+Không dùng tham số khác README nếu mục tiêu là tái tạo đúng bản v10 đã nộp.
+
+## Kiểm tra trước khi nộp
+
+Chạy từ repository root:
 
 ```powershell
-python scripts\main.py eval `
-  --predictions "output\public_submission_v4_chunkphrase.zip" `
-  --references "D:\data\warmup.json" `
-  --all-top-k
-```
-
-## 4. Validation trước upload
-
-Kiểm tra cấu trúc submission v4:
-
-```powershell
-cd "D:\projects\UIT DSC"
 python scripts\verify_submissions.py --task 1 `
-  --task1-submission "Task1 - LegalIR\output\public_submission_v4_chunkphrase.zip"
+  --task1-submission "Task1 - LegalIR\output\public_submission_v10_ce_rrf_top35.zip" `
+  --task1-input "Task1 - LegalIR\data\raw\public_test\public-official.json"
+
+python -m pytest -q tests\test_contracts.py
 ```
 
-Khi có public input thật, thêm:
+Submission hợp lệ phải đáp ứng đồng thời:
 
-```powershell
-  --task1-input "D:\data\public-official.json"
-```
+1. Có đúng 1.000 question ID và khớp input.
+2. Mỗi câu có 1–5 `document_id` dạng string, không trùng.
+3. ZIP chỉ chứa `submission.json` ở root.
+4. Không có câu nào vượt quá 5 document ID.
 
-Kiểm tra toàn bộ regression suite:
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-Smoke test có cả pipeline Task 2 để bảo vệ contract chung, nhưng không phải public-test score của Task 2.
-
-## 5. Data/model policy
-
-- `selected-contexts.zip`, `train.json`, `public-official.json`, `private-official.json` và SQLite index không commit.
-- Model weights và registry local không commit; chỉ giữ `models/approved_models.example.json` làm template.
-- Nếu bật neural branch, model phải có local weights, license, parameter count và BTC approval trong registry. Không bật cờ để bỏ qua policy.
-- Audit/checkpoint/output JSON là artifact tái tạo được và bị ignore; chỉ giữ ZIP submission cần bàn giao.
-
-## 6. File chính
+## File cần giữ
 
 - `Task1 - LegalIR/scripts/main.py`: CLI train/infer/eval.
-- `Task1 - LegalIR/scripts/sqlite_retriever.py`: SQLite FTS5, BM25, phrase search và RRF.
-- `Task1 - LegalIR/scripts/corpus_loader.py`: đọc corpus và chunk text.
-- `Task1 - LegalIR/scripts/evaluate.py`: metric parity/local evaluation.
-- `Task1 - LegalIR/Scoring-Program-Task-LegalIR/scoring.py`: scorer BTC.
-- `scripts/submission_utils.py`: strict submission contract.
-- `scripts/verify_submissions.py`: validator trước upload.
-- `tests/`: contract và end-to-end smoke tests.
+- `Task1 - LegalIR/scripts/sqlite_retriever.py`: candidate retrieval và fusion v10.
+- `Task1 - LegalIR/scripts/reranker.py`: cross-encoder và final RRF.
+- `Task1 - LegalIR/scripts/legal_structure.py`: chunk strategy tùy chọn để benchmark.
+- `Task1 - LegalIR/scripts/evaluate.py`: local metric.
+- `Task1 - LegalIR/scripts/analyze_candidate_oracle.py`: đo candidate ceiling.
+- `Task1 - LegalIR/scripts/evaluate_reranker.py`: đánh giá reranker offline.
+- `scripts/verify_submissions.py`: kiểm tra submission contract.
 
-Khi thay đổi thuật toán hoặc tham số v4, cập nhật README và file handoff trong cùng commit để teammate có thể tái tạo đúng submission.
+Data, index, model weights, audit và checkpoint là artifact local; không push lên GitHub. Chỉ giữ ZIP v10 nếu team cần đối chiếu đúng submission đã chấm.
