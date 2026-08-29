@@ -1,51 +1,61 @@
-# UIT DSC — LegalIR retained workspace
+# UIT DSC — LegalIR v11h
 
-Workspace này giữ ba mục đích duy nhất:
+Workspace này giữ pipeline **LegalIR v11h end-to-end** làm bản chính. Runner
+đơn file chứa ba stage nội bộ F → G → H, dùng tổng khoảng `1.09B < 4B` tham số:
 
-1. **v11 end-to-end compliant**: legal chunking + BQB embedding + Vietnamese
-   reranker, tổng `1.09B < 4B`.
-2. **v10 base**: pipeline fixed-chunk để làm baseline tái lập.
-3. **v57 algorithm reference**: exact legal-heading rescue và rank-cache để
-   nghiên cứu; không dùng v57 model/output làm input cho v11.
+- BQB Vietnamese legal embedding: khoảng `330M`;
+- Vietnamese reranker: khoảng `760M`;
+- query-normalized logistic selector: rất nhỏ, không đáng kể.
 
-## Chạy lại v11 full
+## Chạy lại v11h
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File `
-  "D:\projects\UIT DSC\Task1 - LegalIR\experiments\track_b_v11_research\run_v11_research.ps1" `
-  -Device cuda -Resume
-```
-
-Index mặc định là `Task1 - LegalIR/data/processed/v11_research_256`. Bỏ `-Resume`
-nếu muốn build lại index từ đầu. Models cần thiết là:
-
-- `models/bqbbao6_vietnamese-legal-embedding` — 330M;
-- `models/thanhtantran_Vietnamese_Reranker` — 760M.
-
-## Chạy lại v10 base
+Từ repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File `
-  "D:\projects\UIT DSC\Task1 - LegalIR\experiments\track_b_v10\run_v10_rebuild.ps1" `
-  -Device cuda -Resume
+  "D:\projects\UIT DSC\Task1 - LegalIR\experiments\track_b_v11_research\run_v11h_end_to_end.ps1" `
+  -Device cuda
 ```
 
-## v57 algorithm reference
+Khi GPU không khả dụng:
 
-- `Task1 - LegalIR/scripts/benchmark_exact_heading_rescue.py`
-- `Task1 - LegalIR/scripts/run_v57_exact10.ps1`
-- `Task1 - LegalIR/output/current/v57_exact10/`
-- `Task1 - LegalIR/V49_PIPELINE_DISCLOSURE.md`
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  "D:\projects\UIT DSC\Task1 - LegalIR\experiments\track_b_v11_research\run_v11h_end_to_end.ps1" `
+  -Device cpu
+```
 
-Đây chỉ là tài liệu/thuật toán tham khảo. V57 lineage vượt giới hạn BTC khi
-tính end-to-end, nên không được dùng model/checkpoint/prediction của v57 cho v11.
+Runner tự dùng cache hợp lệ, ưu tiên `.python312-embed\python.exe` nếu có và
+fallback sang `python` trong PATH. Cài dependency khi clone repo:
 
-## Kết quả đã xác nhận
+```powershell
+python -m pip install -r requirements-core.txt -r requirements-neural.txt
+```
 
-- Public anchor `v11c.zip`: Recall `0.903666668`, Precision `0.193800001`.
-- Candidate kế tiếp `v11d.zip`: c35 reranker + exact-heading cutoff80/t10,
-  holdout Recall `0.90275`, Precision `0.1924`.
-- `v11d.zip` đã kiểm tra contract: 1000 question IDs khớp public-official,
-  mỗi câu có đúng 5 document IDs duy nhất; model plan `1.09B < 4B`.
+Hai model cần được đặt local tại:
 
-Runbook chi tiết nằm ở `Task1 - LegalIR/experiments/track_b_v11_research/`.
+- `models/bqbbao6_vietnamese-legal-embedding`;
+- `models/thanhtantran_Vietnamese_Reranker`.
+
+Dữ liệu BTC, model, runtime Python, output và artifact trung gian không nằm
+trong GitHub; chúng bị `.gitignore` vì có thể rebuild hoặc cung cấp riêng.
+Artifact nộp chính là `Task1 - LegalIR/output/v11h.zip`.
+
+## Kết quả đã khóa
+
+- Public Recall: `0.9183`;
+- locked holdout Recall@5: `0.9188333333`;
+- SHA-256 `v11h.zip`:
+  `57CDEF271C86824B128482AD141E140224E8002B7ACC7536CB79DAE90EB7F175`;
+- kiểm thử hiện tại: `46 passed`.
+
+## Tài liệu
+
+- `Task1 - LegalIR/FINAL_V11H_END_TO_END_SUMMARY.md`: luồng chạy và model
+  budget;
+- `Task1 - LegalIR/EXPERIMENT_LOG.md`: toàn bộ thử nghiệm, metric và quyết
+  định promote/reject;
+- `Task1 - LegalIR/CURRENT_STATE.md`: checkpoint mới nhất;
+- `Task1 - LegalIR/V49_PIPELINE_DISCLOSURE.md`,
+  `V14_COLBERT_DISCLOSURE.md`, `V15_COUNTERFACTUAL_DISCLOSURE.md`: các hướng
+  nghiên cứu đã thử và lý do không thay v11h.
