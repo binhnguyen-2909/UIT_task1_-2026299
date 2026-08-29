@@ -157,16 +157,53 @@ class BM25Retriever:
 
 
 def expand_query(query: str) -> str:
-    """Conservative rule expansion; only adds a handful of stable synonyms."""
+    """Conservative rule expansion; only adds a handful of stable synonyms.
+
+    V60: Enhanced with legal-specific expansions for better retrieval.
+    """
+    # General Vietnamese synonyms
     groups = {
         "xử phạt": ("vi phạm", "mức phạt"),
         "thủ tục": ("trình tự", "hồ sơ"),
         "nghĩa vụ": ("trách nhiệm",),
         "cấp phép": ("giấy phép",),
     }
+
+    # V60: Legal-specific expansions
+    legal_groups = {
+        # Legal act types
+        "luật": ("quyết định", "nghị định", "thông tư"),
+        "quyết định": ("qđ", "qd"),
+        "nghị định": ("nd",),
+        "thông tư": ("tt",),
+        # Legal structure
+        "điều": ("khoản", "điểm"),
+        "khoản": ("điều", "điểm"),
+        # Legal actions
+        "ban hành": ("có hiệu lực", "có hiệu lực thi hành"),
+        "hết hiệu lực": ("bãi bỏ", "thay thế"),
+        # Permissions
+        "được phép": ("cho phép", "cấp phép"),
+        "không được": ("cấm", "ngăn cấm", "cấm"),
+        # Obligations
+        "phải": ("bắt buộc", "bắt buộc phải"),
+        "có trách nhiệm": ("chịu trách nhiệm", "chịu trách nhiệm về"),
+        # Time-related
+        "thời hạn": ("hạn", "hạn chót", "trong thời gian"),
+        # Organization
+        "cơ quan": ("đơn vị", "tổ chức"),
+        "người": ("công dân", "cá nhân"),
+    }
+
     additions: List[str] = []
     lowered = query.casefold()
     for trigger, synonyms in groups.items():
         if trigger in lowered:
             additions.extend(synonyms)
+
+    # V60: Apply legal expansions
+    for trigger, expansions in legal_groups.items():
+        if trigger in lowered:
+            additions.extend(expansions)
+
     return " ".join([query, *additions]).strip()

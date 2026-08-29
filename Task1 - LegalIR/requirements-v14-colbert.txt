@@ -1,0 +1,4 @@
+# Phase-B additions. Existing LegalIR requirements (torch, numpy, sklearn,
+# lightgbm, joblib) remain unchanged and are reused.
+sentence-transformers==6.0.0
+einops==0.8.2

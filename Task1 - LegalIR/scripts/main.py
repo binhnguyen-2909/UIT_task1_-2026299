@@ -32,8 +32,8 @@ if str(COMMON_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(COMMON_SCRIPTS))
 from model_policy import validate_model_plan  # noqa: E402
 
-DEFAULT_INDEX = TASK_ROOT / "data" / "processed" / "v10_index"
-DEFAULT_OUTPUT = TASK_ROOT / "output" / "public_submission_v10_ce_rrf_top35.zip"
+DEFAULT_INDEX = TASK_ROOT / "data" / "processed" / "v11_research_256"
+DEFAULT_OUTPUT = TASK_ROOT / "output" / "v11.zip"
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
 
@@ -148,6 +148,11 @@ def _build_retriever(args: argparse.Namespace) -> Any:
             rerank_passages_per_doc=args.rerank_passages_per_doc,
             reranker_batch_size=args.reranker_batch_size,
             reranker_max_length=args.reranker_max_length,
+            reranker_aggregation=args.reranker_aggregation,
+            reranker_fp16=args.reranker_fp16,
+            adaptive_rerank=args.adaptive_rerank,
+            normalize_corpus=args.normalize_corpus,
+            clean_training_data=args.clean_training_data,
             reranker_rrf_weight=args.reranker_rrf_weight,
             reranker_rrf_k=args.reranker_rrf_k,
         )
@@ -212,6 +217,11 @@ def command_infer(args: argparse.Namespace) -> int:
             rerank_passages_per_doc=args.rerank_passages_per_doc,
             reranker_batch_size=args.reranker_batch_size,
             reranker_max_length=args.reranker_max_length,
+            reranker_aggregation=args.reranker_aggregation,
+            reranker_fp16=args.reranker_fp16,
+            adaptive_rerank=args.adaptive_rerank,
+            normalize_corpus=args.normalize_corpus,
+            clean_training_data=args.clean_training_data,
             reranker_rrf_weight=args.reranker_rrf_weight,
             reranker_rrf_k=args.reranker_rrf_k,
         )
@@ -233,6 +243,10 @@ def command_infer(args: argparse.Namespace) -> int:
             "rerank_candidates": retriever.rerank_candidates,
             "rerank_passages_per_doc": retriever.rerank_passages_per_doc,
             "reranker_max_length": retriever.reranker_max_length,
+            "reranker_aggregation": retriever.reranker_aggregation,
+            "adaptive_rerank": retriever.adaptive_rerank,
+            "normalize_corpus": retriever.normalize_corpus,
+            "clean_training_data": retriever.clean_training_data,
             "reranker_rrf_weight": retriever.reranker_rrf_weight,
             "reranker_rrf_k": retriever.reranker_rrf_k,
         }
@@ -375,19 +389,20 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
     parser.add_argument(
         "--chunk-strategy",
         choices=("legal", "fixed"),
-        default="fixed",
+        default="legal",
         help="legal preserves article/section/item context; fixed uses fixed-size chunks",
     )
     parser.add_argument(
-        "--candidates", type=int, default=100,
-        help="Lexical/dense candidate pool before final top-k (100 is tuned for the neural branch)",
+        "--candidates", type=int, default=200,
+        help="Lexical/dense candidate pool before final top-k",
     )
     parser.add_argument("--top-k", type=int, choices=range(1, 6), default=5)
     parser.add_argument(
-        "--dense-weight", type=float, default=0.05,
-        help="Small dense RRF weight; tuned on the leak-free Task1 holdout",
+        "--dense-weight", type=float, default=0.30,
+        help="Dense RRF weight used by the v11 main branch",
     )
-    parser.add_argument("--title-weight", type=float, default=3.0)
+    # V60: Updated default for title weight
+    parser.add_argument("--title-weight", type=float, default=5.0)
     parser.add_argument("--alias-weight", type=float, default=2.0)
     parser.add_argument("--passage-weight", type=float, default=1.0)
     parser.add_argument("--question-weight", type=float, default=4.0)
@@ -420,9 +435,10 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
         "--no-chunk-phrase", action="store_true",
         help="Disable chunk-level phrase FTS (enabled in v10)",
     )
+    # V60: Updated default for chunk phrase weight
     parser.add_argument(
         "--chunk-phrase-weight", type=float, default=None,
-        help="Override chunk-phrase RRF weight (default 0.25 from v3 holdout)",
+        help="Override chunk-phrase RRF weight (default 0.35 from V60)",
     )
     parser.add_argument(
         "--chunk-phrase-pair-limit", type=int, default=None,
@@ -449,19 +465,19 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
         help="Embedding batch size; 16 is a safe RTX 3050 default",
     )
     parser.add_argument(
-        "--dense-max-seq-length", type=int, default=384,
+        "--dense-max-seq-length", type=int, default=256,
         help="Maximum embedding tokens; lower this if GPU memory is insufficient",
     )
     parser.add_argument(
-        "--dense-rrf-k", type=int, default=60,
+        "--dense-rrf-k", type=int, default=20,
         help="RRF constant for the dense/lexical fusion",
     )
     parser.add_argument(
-        "--question-dense-weight", type=float, default=0.02,
+        "--question-dense-weight", type=float, default=0.05,
         help="Small RRF weight for labelled train-question neighbors",
     )
     parser.add_argument(
-        "--question-dense-rrf-k", type=int, default=60,
+        "--question-dense-rrf-k", type=int, default=20,
         help="RRF constant for train-question neighbor fusion",
     )
     parser.add_argument(
@@ -469,11 +485,11 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
         help="Number of nearest labelled train questions used for recall expansion",
     )
     parser.add_argument(
-        "--rerank-candidates", type=int, default=35,
-        help="Number of fused candidates sent to the v10 cross-encoder",
+        "--rerank-candidates", type=int, default=80,
+        help="Number of fused candidates sent to the v11 cross-encoder",
     )
     parser.add_argument(
-        "--rerank-passages-per-doc", type=int, default=2,
+        "--rerank-passages-per-doc", type=int, default=3,
         help="Query-focused passages scored per candidate document",
     )
     parser.add_argument(
@@ -481,16 +497,36 @@ def _retrieval_options(parser: argparse.ArgumentParser, corpus_required: bool = 
         help="Cross-encoder batch size used by v10 on an RTX 3050 6 GB",
     )
     parser.add_argument(
-        "--reranker-max-length", type=int, default=None,
-        help="Optional transformer sequence cap; 256 is a fast public-test setting",
+        "--reranker-max-length", type=int, default=768,
+        help="Optional transformer sequence cap; v11 preserves long legal evidence",
     )
     parser.add_argument(
-        "--reranker-rrf-weight", type=float, default=0.8,
-        help="v10 neural rank weight in lexical/neural RRF",
+        "--reranker-aggregation", choices=("max", "top3"), default="top3",
+        help="Aggregate the best one passage or top three passages per document",
     )
     parser.add_argument(
-        "--reranker-rrf-k", type=int, default=5,
-        help="v10 RRF constant for lexical/neural reranking",
+        "--reranker-fp16", action=argparse.BooleanOptionalAction, default=True,
+        help="Run the CUDA reranker in FP16 for lower latency/memory; parameter count is unchanged",
+    )
+    parser.add_argument(
+        "--adaptive-rerank", action=argparse.BooleanOptionalAction, default=True,
+        help="Hydrate complementary query-focused passages for each rerank candidate",
+    )
+    parser.add_argument(
+        "--normalize-corpus", action=argparse.BooleanOptionalAction, default=True,
+        help="Apply NFC/layout normalization to official passages before indexing",
+    )
+    parser.add_argument(
+        "--clean-training-data", action=argparse.BooleanOptionalAction, default=True,
+        help="Union labels across duplicate normalized questions before indexing",
+    )
+    parser.add_argument(
+        "--reranker-rrf-weight", type=float, default=1.0,
+        help="v11 neural rank weight in lexical/neural RRF",
+    )
+    parser.add_argument(
+        "--reranker-rrf-k", type=int, default=10,
+        help="v11 RRF constant for lexical/neural reranking",
     )
 
 

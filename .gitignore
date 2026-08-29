@@ -19,6 +19,21 @@ models/*
 .coverage
 htmlcov/
 
+# Local Python environments (machine-specific; never commit)
+.venv_bge/
+**/.venv_bge/
+.python312-embed/
+**/.python312-embed/
+
+# Locally retained submission bundles (keep on disk, do not commit)
+Task1 - LegalIR/output/release/
+
+# Generated pipeline outputs and local checkpoints (rebuildable from source)
+Task*/output/
+
+# Generated experiment logs, split data and intermediate artifacts
+Task*/experiments/**/artifacts/
+
 # BTC official corpus (large; not for public repo)
 # Keep raw/ folder but ignore the heavy extracted data and downloads.
 **/selected-contexts
@@ -48,3 +63,7 @@ Task1 - LegalIR/output/*.zip
 model_registry.json
 **/approved_models.local.json
 Task1 - LegalIR/TASK2_TRANSFER.md
+
+# Project-local RTK binary and runtime analytics/tee state
+.tools/
+.rtk/

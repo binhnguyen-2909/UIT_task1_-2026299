@@ -33,8 +33,16 @@ def reciprocal_rank_fuse(
     lexical_rank = {
         str(item["doc_id"]): rank for rank, item in enumerate(lexical, 1)
     }
+    neural_order = list(neural)
+    if any("rerank_score" in item for item in neural_order):
+        neural_order.sort(
+            key=lambda item: (
+                -float(item.get("rerank_score", float("-inf"))),
+                str(item["doc_id"]),
+            )
+        )
     neural_rank = {
-        str(item["doc_id"]): rank for rank, item in enumerate(neural, 1)
+        str(item["doc_id"]): rank for rank, item in enumerate(neural_order, 1)
     }
     universe = list(dict.fromkeys([*lexical_rank, *neural_rank]))
     by_id = {str(item["doc_id"]): dict(item) for item in lexical}
@@ -86,10 +94,16 @@ class Reranker:
         device: Optional[str] = None,
         batch_size: int = 16,
         max_length: Optional[int] = None,
+        passage_aggregation: str = "max",
+        use_fp16: bool = False,
     ):
         self.model_name = model_name
         self.batch_size = int(batch_size)
         self.max_length = int(max_length) if max_length is not None else None
+        if passage_aggregation not in {"max", "top3"}:
+            raise ValueError("passage_aggregation must be 'max' or 'top3'")
+        self.passage_aggregation = passage_aggregation
+        self.use_fp16 = bool(use_fp16)
         self.device = None if device in (None, "auto") else device
         self.use_fallback = model_name is None
         self.model: Any = None
@@ -113,6 +127,24 @@ class Reranker:
                     raise ValueError("max_length must be positive")
                 model_kwargs["max_length"] = self.max_length
             self.model = CrossEncoder(str(model_path), **model_kwargs)
+            if self.use_fp16 and str(device or "").casefold() == "cuda":
+                # FP16 changes arithmetic precision, not the model's parameter
+                # count. It is an explicit runtime optimization for 6 GB GPUs.
+                self.model.model.half()
+
+    def _aggregate_passage_scores(self, scores: List[float]) -> float:
+        """Aggregate evidence without rewarding a document for length alone."""
+
+        if not scores:
+            return float("-inf")
+        ordered = sorted((float(value) for value in scores), reverse=True)
+        if self.passage_aggregation == "max" or len(ordered) == 1:
+            return ordered[0]
+        # The best legal unit remains dominant; corroborating units contribute
+        # only a small bounded amount.
+        return ordered[0] + 0.15 * ordered[1] + (
+            0.05 * ordered[2] if len(ordered) > 2 else 0.0
+        )
 
     def rerank(self, query: str, candidates: List[Dict[str, Any]], top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         if not candidates:
@@ -141,11 +173,12 @@ class Reranker:
                         + 0.10 * math.tanh(base_score)
                     )
                 best_index = max(range(len(passage_scores)), key=passage_scores.__getitem__)
-                score = passage_scores[best_index]
+                score = self._aggregate_passage_scores(passage_scores)
                 features = passage_features[best_index]
                 candidate["text"] = str(passages[best_index])
                 candidate["rerank_passage_index"] = best_index
                 candidate["rerank_features"] = features
+                candidate["passage_scores"] = [float(value) for value in passage_scores]
                 scores.append(score)
         else:
             pairs = []
@@ -166,11 +199,13 @@ class Reranker:
                 pairs, batch_size=self.batch_size, show_progress_bar=False
             )]
             scores = [float("-inf")] * len(output)
+            passage_scores_by_candidate: List[List[float]] = [[] for _ in output]
             best_indices = [0] * len(output)
             passage_positions = [0] * len(output)
             for owner, score in zip(owners, flat_scores):
                 position = passage_positions[owner]
                 passage_positions[owner] += 1
+                passage_scores_by_candidate[owner].append(float(score))
                 if score > scores[owner]:
                     scores[owner] = score
                     best_indices[owner] = position
@@ -178,6 +213,10 @@ class Reranker:
                 best_index = best_indices[candidate_index]
                 candidate["text"] = passages_by_candidate[candidate_index][best_index]
                 candidate["rerank_passage_index"] = best_index
+                candidate["passage_scores"] = passage_scores_by_candidate[candidate_index]
+                scores[candidate_index] = self._aggregate_passage_scores(
+                    passage_scores_by_candidate[candidate_index]
+                )
 
         for candidate, score in zip(output, scores):
             candidate["rerank_score"] = float(score)
@@ -198,6 +237,7 @@ class Reranker:
                 str(candidate["doc_id"]): float(candidate["rerank_score"])
                 for candidate in output
             },
+            "passage_aggregation": self.passage_aggregation,
         }
         return output[:top_k] if top_k is not None else output
 

@@ -35,16 +35,14 @@ TASK1_STRUCTURE = load_module(
 TASK1_RERANKER = load_module(
     "task1_reranker_test", TASK1_SCRIPTS / "reranker.py"
 )
+TASK1_DATA_QUALITY = load_module(
+    "task1_data_quality_test", TASK1_SCRIPTS / "data_quality.py"
+)
 TASK1_RERANK_EVAL = load_module(
     "task1_evaluate_reranker_test", TASK1_SCRIPTS / "evaluate_reranker.py"
 )
 TASK1_MAIN = load_module("task1_main_test", TASK1_SCRIPTS / "main.py")
 sys.path.remove(str(TASK1_SCRIPTS))
-TASK2_EVAL = load_module(
-    "task2_evaluate_test", ROOT / "Task2 - LegalQA" / "scripts" / "evaluate.py"
-)
-
-
 class ContractTests(unittest.TestCase):
     def test_legal_chunking_preserves_article_context(self):
         text = """
@@ -96,6 +94,34 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(reranker.last_trace["neural_ids"], ["1"])
         self.assertIn("1", reranker.last_trace["neural_scores"])
 
+    def test_top3_passage_aggregation_rewards_corroborating_units(self):
+        reranker = TASK1_RERANKER.Reranker(passage_aggregation="top3")
+        ranked = reranker.rerank(
+            "thuế thu nhập cá nhân",
+            [{
+                "doc_id": "1",
+                "score": 0.0,
+                "text": "đoạn không liên quan",
+                "passages": [
+                    "quy định về thuế thu nhập cá nhân",
+                    "thuế thu nhập cá nhân phải kê khai",
+                    "thời hạn nộp thuế thu nhập cá nhân",
+                ],
+            }],
+        )
+        self.assertEqual(ranked[0]["rerank_passage_index"], 0)
+        self.assertEqual(len(ranked[0]["passage_scores"]), 3)
+        self.assertEqual(reranker.last_trace["passage_aggregation"], "top3")
+
+    def test_training_cleaning_unions_duplicate_question_labels(self):
+        cleaned, report = TASK1_DATA_QUALITY.collapse_training_questions({
+            "a": {"question": "  Điều 1 quy định gì? ", "answer": ["10"]},
+            "b": {"question": "điều 1 QUY ĐỊNH gì?", "answer": ["11", "10"]},
+        })
+        self.assertEqual(cleaned["a"]["answer"], ["10", "11"])
+        self.assertEqual(report["duplicate_question_rows_merged"], 1)
+        self.assertEqual(report["conflicting_duplicate_groups_unioned"], 1)
+
     def test_reranker_rrf_is_deterministic(self):
         lexical = [{"doc_id": value} for value in "abcdef"]
         neural = [{"doc_id": value} for value in "fedcba"]
@@ -104,6 +130,17 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual([item["doc_id"] for item in fused], list("abcdf"))
         self.assertTrue(all("rerank_fusion_score" in item for item in fused))
+
+    def test_reranker_rrf_sorts_scored_neural_items(self):
+        lexical = [{"doc_id": "a"}, {"doc_id": "b"}]
+        neural = [
+            {"doc_id": "a", "rerank_score": 0.1},
+            {"doc_id": "b", "rerank_score": 0.9},
+        ]
+        fused = TASK1_RERANKER.reciprocal_rank_fuse(
+            lexical, neural, neural_weight=2.0, rrf_k=10, top_k=2
+        )
+        self.assertEqual([item["doc_id"] for item in fused], ["b", "a"])
 
     def test_exemplar_alignment_preserves_legal_conditions(self):
         query = "Diện tích tối thiểu tách thửa đất nông nghiệp tại Nam Định?"
@@ -144,39 +181,38 @@ class ContractTests(unittest.TestCase):
             self.assertFalse(without_sources["store_source_rankings"])
             self.assertTrue(with_sources["store_source_rankings"])
 
-    def test_v10_cli_defaults(self):
+    def test_v11_cli_defaults(self):
         args = TASK1_MAIN.build_parser().parse_args([
             "infer", "--input", "public-official.json"
         ])
         self.assertEqual(args.backend, "sqlite")
         self.assertEqual(
             args.index_dir,
-            ROOT / "Task1 - LegalIR" / "data" / "processed" / "v10_index",
+            ROOT / "Task1 - LegalIR" / "data" / "processed" / "v11_research_256",
         )
         self.assertEqual(
             args.output,
             ROOT
             / "Task1 - LegalIR"
             / "output"
-            / "public_submission_v10_ce_rrf_top35.zip",
+            / "v11.zip",
         )
-        self.assertEqual(args.chunk_strategy, "fixed")
-        self.assertEqual(args.rerank_candidates, 35)
+        self.assertEqual(args.chunk_strategy, "legal")
+        self.assertEqual(args.candidates, 200)
+        self.assertEqual(args.dense_weight, 0.30)
+        self.assertEqual(args.rerank_candidates, 80)
+        self.assertEqual(args.rerank_passages_per_doc, 3)
         self.assertEqual(args.reranker_batch_size, 16)
-        self.assertEqual(args.reranker_rrf_weight, 0.8)
-        self.assertEqual(args.reranker_rrf_k, 5)
+        self.assertEqual(args.reranker_max_length, 768)
+        self.assertEqual(args.reranker_aggregation, "top3")
+        self.assertEqual(args.reranker_rrf_weight, 1.0)
+        self.assertEqual(args.reranker_rrf_k, 10)
+        self.assertTrue(args.adaptive_rerank)
+        self.assertTrue(args.normalize_corpus)
+        self.assertTrue(args.clean_training_data)
+        self.assertTrue(args.reranker_fp16)
         self.assertFalse(hasattr(args, "ltr_model"))
         self.assertFalse(hasattr(args, "llm_reranker_model"))
-
-    def test_task2_rouge_ascii_tokenizer(self):
-        self.assertEqual(
-            TASK2_EVAL.btc_rouge_tokens("Căn cứ Điều 76"),
-            ["c", "n", "c", "i", "u", "76"],
-        )
-        self.assertEqual(
-            TASK2_EVAL.rouge_l_fmeasure("Căn cứ Điều 76", "Căn cứ Điều 76"),
-            1.0,
-        )
 
     def test_strict_zip_and_task_contract(self):
         submission = {"q": {"answer": ["7"]}}

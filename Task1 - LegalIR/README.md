@@ -1,214 +1,89 @@
-# UIT DSC 2026 — Task 1 LegalIR (v10)
+# UIT DSC Task 1 — LegalIR v11h main
 
-Pipeline production hiện tại của đội cho Task 1. Bản public v10 đạt:
+Pipeline chính hiện tại là **v11h**, được thiết kế để chạy lại end-to-end dưới
+giới hạn 4B tham số. V10 chỉ được giữ làm baseline/fallback; v57 exact10 được
+giữ để tham khảo thuật toán vì lineage đầy đủ của v57 vượt ngân sách 4B.
+Runner nộp/trình bày là một file duy nhất; bên trong có ba stage nội bộ F → G → H
+để giữ đúng logic và thứ tự tái lập.
 
-| Recall | Precision | Số dự đoán |
-|---:|---:|---:|
-| **0.8871** | **0.1900** | 5 document_id/câu |
+## Trạng thái submission
 
-Submission đã chấm: `output/public_submission_v10_ce_rrf_top35.zip`
+| File | Điểm/metric đã biết | Trạng thái |
+|---|---:|---|
+| `output/v11h.zip` | public **`0.9183`**; locked holdout `0.9188333` | **Main compliant** |
+| `output/v11g.zip` | public `0.9086`; locked holdout `0.9120000` | Ablation feature v1 |
+| `output/v11f.zip` | public `0.9106`; locked holdout `0.9079167` | Fallback compliant trước PRF |
+| v57 exact10 | public `0.9190` | Chỉ tham khảo thuật toán; end-to-end >4B |
 
-SHA-256: `b7bf4365b6d1486356987c835013435580c702594fb23ed9cab4193fde954000`
-
-## 1. Pipeline v10
-
-### Stage 1 — Candidate retrieval
-
-Mỗi câu hỏi lấy tối đa 100 candidate từ các tín hiệu bổ sung cho nhau:
-
-- SQLite FTS5/BM25 trên fixed-size chunks 1.200 ký tự, overlap 150;
-- exact phrase và legal bigram;
-- câu hỏi train gần nhất và document prior;
-- dense passage retrieval bằng `bqbbao6/vietnamese-legal-embedding`;
-- dense train-question retrieval bằng cùng embedding model;
-- Reciprocal Rank Fusion (RRF) để tạo candidate ranking ban đầu.
-
-Cấu hình đã dùng:
-
-| Tham số | Giá trị |
-|---|---:|
-| Candidate pool | 100 |
-| Dense passage weight | 0.05 |
-| Dense RRF k | 60 |
-| Train-question dense weight | 0.02 |
-| Train-question dense RRF k | 60 |
-| Train-question neighbors | 20 |
-
-### Stage 2 — Cross-encoder reranking
-
-- Model: `thanhtantran/Vietnamese_Reranker`;
-- rerank 35 candidate đầu;
-- tối đa 2 passage giàu tín hiệu cho mỗi document;
-- fusion lexical rank và neural rank bằng RRF;
-- lexical weight `1.0`, neural weight `0.8`, RRF `k=5`;
-- luôn xuất đúng 5 `document_id` khác nhau.
-
-Tổng tham số neural khai báo: khoảng **1.09B** (`330M + 760M`), dưới giới hạn 4B.
-
-Không dùng LambdaMART v9, LLM listwise hoặc dynamic top-k trong pipeline này.
-
-## 2. Cấu trúc repository
+Model plan v11:
 
 ```text
-Task1 - LegalIR/
-├── README.md
-├── model_registry.v10.example.json
-├── Scoring-Program-Task-LegalIR/
-│   ├── metadata.yaml
-│   └── scoring.py
-├── scripts/
-│   ├── main.py                    # train / infer / eval / variants
-│   ├── sqlite_retriever.py        # retrieval và fusion v10
-│   ├── reranker.py                # cross-encoder + RRF
-│   ├── bm25_retriever.py          # tokenize/query expansion
-│   ├── legal_structure.py         # chunk strategy tùy chọn để benchmark
-│   ├── retrieval_types.py
-│   ├── evaluate.py
-│   ├── analyze_candidate_oracle.py
-│   └── evaluate_reranker.py
-└── output/
-    └── public_submission_v10_ce_rrf_top35.zip
+BQB Vietnamese legal embedding  0.33B
+Vietnamese reranker             0.76B
+Tiny supervised LTR            <0.00001B
+                                ---------
+                                ~1.09B < 4B
 ```
 
-`data/raw`, `data/processed`, model weights, audit và checkpoint là local artifacts; `.gitignore` không cho push các file lớn này.
+## V11h làm gì
 
-## 3. Chuẩn bị môi trường
+1. Stage-1 kết hợp legal FTS/chunk phrase/citation với BQB dense retrieval.
+2. Corpus-only PRF và legal-citation completion bổ sung candidate ở phần đuôi;
+   top-5 Stage-1 được khóa để không làm hỏng head ordering.
+3. Stage-2 chấm 35 document, tối đa 3 legal chunks/document bằng Vietnamese
+   reranker, max length 768, FP16.
+4. Feature v2 chuẩn hóa neural score theo từng query, giữ provenance trước PRF,
+   rank agreement, exact phrase/title và các tín hiệu tỷ lệ độ dài.
+5. Tiny pointwise-logistic LTR (`C=1`) học fusion từ 1.197 câu complement sạch
+   bằng grouped out-of-fold CV.
+6. Supervised `document_prior` bị vô hiệu hóa vì locked test đã chứng minh nó
+   gây label leakage.
+7. Exact-heading threshold 10 được dùng làm rescue bảo thủ sau LTR.
 
-Khuyến nghị Python 3.10+, Windows PowerShell và NVIDIA GPU 6 GB VRAM.
+Safe-tail PRF tăng locked candidate oracle@35 từ `0.960667` lên `0.967667`
+trong khi giữ nguyên Stage-1 Recall@5. Trên complement grouped OOF, v11h đạt
+Recall `0.901866` với fold std `0.006585`. Cấu hình khóa trước đạt Recall
+`0.918833` trên holdout 1.000 câu và public `0.9183`. Public gần locked holdout
+trong `0.000534`, cho thấy gate hiện tại transfer tốt hơn các bản trước.
 
-Chạy từ repository root:
+## Chạy lại
+
+Runner v11h end-to-end (tự bỏ qua cache hợp lệ đã có, dùng RTK cho output lớn):
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+Task1 - LegalIR\experiments\track_b_v11_research\run_v11h_end_to_end.ps1 -Device cuda
+```
+
+Runner ưu tiên `\.python312-embed\python.exe` nếu runtime local còn tồn tại;
+nếu không, nó tự fallback sang `python` trong PATH. Vì vậy runtime nhúng và
+output/checkpoint đều bị `.gitignore`, không cần push lên repository. Sau khi
+clone, cài dependency bằng:
+
+```powershell
 python -m pip install -r requirements-core.txt -r requirements-neural.txt
 ```
 
-Hai model phải nằm đúng vị trí:
+Hai model vẫn cần được đặt ở workspace root:
+`models/bqbbao6_vietnamese-legal-embedding/` và
+`models/thanhtantran_Vietnamese_Reranker/`.
 
-```text
-models/
-├── bqbbao6_vietnamese-legal-embedding/
-└── thanhtantran_Vietnamese_Reranker/
-```
+Các runner `run_v11f_end_to_end.ps1` và `run_v11g_end_to_end.ps1` chỉ giữ làm
+tài liệu lineage; runner chính không gọi chúng.
 
-Có thể tải bằng Hugging Face CLI từ repository root:
+Các bước complement/LTR có script tái lập riêng:
 
-```powershell
-hf download bqbbao6/vietnamese-legal-embedding `
-  --local-dir "models\bqbbao6_vietnamese-legal-embedding"
+- `scripts/prepare_v11_complement_split.py`
+- `scripts/parallel_stage1_infer.py`
+- `scripts/corpus_prf_stage1.py`
+- `scripts/batch_stage2_rerank.py`
+- `scripts/v11_tiny_ltr_complement.py`
+- `scripts/package_submission.py`
 
-hf download thanhtantran/Vietnamese_Reranker `
-  --local-dir "models\thanhtantran_Vietnamese_Reranker"
-```
+Chi tiết command, leakage gate, metric và artifact nằm trong
+`experiments/track_b_v11_research/EXPERIMENT_LOG.md`.
 
-`model_registry.v10.example.json` đã khai báo đúng hai model và tổng tham số. Không đổi model nếu chưa cập nhật registry và kiểm tra giới hạn 4B.
+## Artifact tham khảo
 
-## 4. Chuẩn bị data
-
-Đặt dữ liệu BTC như sau:
-
-```text
-Task1 - LegalIR/data/raw/public_test/
-├── selected-contexts.zip
-├── train.json
-└── public-official.json
-```
-
-Không cần giải nén `selected-contexts.zip`. Ba file này không được commit lên GitHub.
-
-## 5. Build index v10
-
-Chạy từ thư mục `Task1 - LegalIR`:
-
-```powershell
-python scripts\main.py train `
-  --corpus "data\raw\public_test\selected-contexts.zip" `
-  --train-data "data\raw\public_test\train.json" `
-  --index-dir "data\processed\v10_index" `
-  --chunk-strategy fixed `
-  --chunk-size 1200 `
-  --chunk-overlap 150 `
-  --embedding-model "..\models\bqbbao6_vietnamese-legal-embedding" `
-  --candidates 100 `
-  --dense-weight 0.05 `
-  --dense-rrf-k 60 `
-  --question-dense-weight 0.02 `
-  --question-dense-rrf-k 60 `
-  --question-dense-candidates 20 `
-  --model-registry "model_registry.v10.example.json" `
-  --device cuda `
-  --dense-device cuda `
-  --no-reranker
-```
-
-Index sinh ra tại `data/processed/v10_index/` gồm SQLite FTS5, dense passage embeddings và dense train-question embeddings.
-
-Nếu SQLite index đã có và chỉ cần build lại dense caches, thêm `--reuse-index`.
-
-## 6. Chạy public inference
-
-```powershell
-python scripts\main.py infer `
-  --index-dir "data\processed\v10_index" `
-  --input "data\raw\public_test\public-official.json" `
-  --output "output\public_submission_v10_ce_rrf_top35.zip" `
-  --reranker-model "..\models\thanhtantran_Vietnamese_Reranker" `
-  --rerank-candidates 35 `
-  --rerank-passages-per-doc 2 `
-  --reranker-batch-size 16 `
-  --reranker-rrf-weight 0.8 `
-  --reranker-rrf-k 5 `
-  --top-k 5 `
-  --checkpoint-every 5 `
-  --model-registry "model_registry.v10.example.json" `
-  --device cuda
-```
-
-RTX 3050 6 GB đã chạy đủ 1.000 câu trong khoảng 112 phút. Nếu bị ngắt, chạy lại đúng command và thêm `--resume`. Không đổi option khi resume vì checkpoint có run signature.
-
-Pipeline tạo ba local artifacts:
-
-- `*.zip`: file duy nhất cần nộp;
-- `*.audit.json`: trace lexical/neural để debug;
-- `*.checkpoint.json`: trạng thái resume.
-
-## 7. Verify trước khi nộp
-
-Từ thư mục `Task1 - LegalIR`:
-
-```powershell
-python ..\scripts\verify_submissions.py `
-  --task 1 `
-  --task1-submission "output\public_submission_v10_ce_rrf_top35.zip" `
-  --task1-input "data\raw\public_test\public-official.json"
-```
-
-Kết quả bắt buộc:
-
-```text
-Questions: 1000
-Predicted doc IDs: 5000 (avg 5.00)
-[VALID] Format, IDs, and archive contract passed
-READY TO UPLOAD
-```
-
-ZIP phải chỉ có một file `submission.json` ở root. Trả nhiều hơn 5 ID cho bất kỳ câu nào sẽ bị chấm Recall và Precision bằng 0 cho câu đó.
-
-## 8. Tests
-
-Từ repository root:
-
-```powershell
-python -m pytest -q tests\test_contracts.py
-```
-
-Không chạy `pytest` toàn repository nếu máy chưa cài dependency riêng của Task2.
-
-## 9. Troubleshooting
-
-- OOM: giảm `--reranker-batch-size` từ 16 xuống 8; ranking không đổi.
-- Sai model path: kiểm tra hai thư mục trong `../models` và registry.
-- Resume bị từ chối: command/input/index/config khác lần chạy trước; xóa checkpoint cũ hoặc dùng output name mới.
-- Output thiếu câu: không tự sửa JSON; chạy lại bằng `--resume`, sau đó verify ZIP.
+- Các kết quả V10/V57 và toàn bộ ablation được ghi trong
+  `EXPERIMENT_LOG.md`, `CURRENT_STATE.md` và các disclosure. Không dùng
+  checkpoint/prediction cũ trong v11h; chỉ tái sử dụng ý tưởng đã qua gate.

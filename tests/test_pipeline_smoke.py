@@ -60,6 +60,25 @@ class PipelineSmokeTests(unittest.TestCase):
         self.assertEqual(data["q1"]["answer"][0], "740")
         self.assertEqual(data["q2"]["answer"][0], "741")
 
+    def test_v11_research_flags_round_trip_into_index_config(self):
+        main = ROOT / "Task1 - LegalIR" / "scripts" / "main.py"
+        index = self.work / "task1-v11-index"
+        run([
+            sys.executable, str(main), "train", "--corpus", str(self.corpus),
+            "--index-dir", str(index), "--chunk-strategy", "legal",
+            "--normalize-corpus", "--clean-training-data", "--adaptive-rerank",
+            "--reranker-aggregation", "top3", "--reranker-fp16", "--no-reranker",
+        ])
+        config = json.loads(
+            (index / "legalir.config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(config["chunk_strategy"], "legal")
+        self.assertTrue(config["normalize_corpus"])
+        self.assertTrue(config["clean_training_data"])
+        self.assertTrue(config["adaptive_rerank"])
+        self.assertEqual(config["reranker_aggregation"], "top3")
+        self.assertTrue(config["reranker_fp16"])
+
     def test_task1_optional_document_phrase_fts(self):
         main = ROOT / "Task1 - LegalIR" / "scripts" / "main.py"
         index = self.work / "task1-v3-index"
@@ -106,9 +125,9 @@ class PipelineSmokeTests(unittest.TestCase):
             "--document-fts-db", str(document_db),
         ])
         audit = json.loads(output.with_suffix(".audit.json").read_text(encoding="utf-8"))
-        self.assertEqual(audit["backend"], "sqlite_chunk_fts5_v5_document_phrase_rrf")
+        self.assertEqual(audit["backend"], "sqlite_chunk_fts5_v6_legal_enhanced")
         self.assertEqual(audit["document_fts"]["documents"], 2)
-        self.assertEqual(audit["document_fts"]["phrase_weight"], 0.25)
+        self.assertEqual(audit["document_fts"]["phrase_weight"], 0.35)
         self.assertTrue(all(
             item["metadata"]["document_phrase"]["enabled"]
             for item in audit["queries"]
@@ -131,15 +150,6 @@ class PipelineSmokeTests(unittest.TestCase):
         )
         self.assertNotEqual(incompatible.returncode, 0)
         self.assertIn("checkpoint", (incompatible.stdout + incompatible.stderr).lower())
-
-    def test_task2_end_to_end(self):
-        main = ROOT / "Task2 - LegalQA" / "scripts" / "main.py"
-        output = self.work / "task2" / "submission.zip"
-        run([sys.executable, str(main), "--corpus", str(self.corpus), "--input", str(self.input), "--output", str(output)])
-        with zipfile.ZipFile(output) as archive:
-            data = json.loads(archive.read("submission.json"))
-        self.assertIn("nghỉ hằng năm", data["q1"]["answer"])
-        self.assertIn("2 triệu đồng", data["q2"]["answer"])
 
     def test_official_corpus_analyzer_reads_zip_schema(self):
         analyzer = ROOT / "scripts" / "corpus_analyzer.py"

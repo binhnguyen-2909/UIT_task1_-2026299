@@ -1,0 +1,48 @@
+{
+  "limit_billion_parameters": 4.0,
+  "counting_rule": "sum of all unique model parameters in the end-to-end system; quantization does not reduce parameter count",
+  "profiles": {
+    "v57_current_lineage": {
+      "status": "invalid",
+      "components": {
+        "bqb_vietnamese_legal_embedding": 0.33,
+        "qwen3_embedding": 0.60,
+        "vietnamese_reranker": 0.76,
+        "vi_qwen2_1_5b_rag": 1.50,
+        "qwen2_5_3b_instruct": 3.00
+      },
+      "total_billion_parameters": 6.19
+    },
+    "v47_like": {
+      "status": "candidate_compliant",
+      "components": {
+        "bqb_vietnamese_legal_embedding": 0.33,
+        "qwen3_embedding": 0.60,
+        "vietnamese_reranker": 0.76,
+        "vi_qwen2_1_5b_rag": 1.50
+      },
+      "total_billion_parameters": 3.19
+    },
+    "qwen25_plus_bqb": {
+      "status": "candidate_compliant",
+      "components": {
+        "bqb_vietnamese_legal_embedding": 0.33,
+        "qwen2_5_3b_instruct": 3.00
+      },
+      "total_billion_parameters": 3.33
+    },
+    "pure_rule_based": {
+      "status": "compliant",
+      "components": {},
+      "total_billion_parameters": 0.0
+    },
+    "v11_legal_hybrid": {
+      "status": "candidate_compliant",
+      "components": {
+        "bqb_vietnamese_legal_embedding": 0.33,
+        "vietnamese_reranker": 0.76
+      },
+      "total_billion_parameters": 1.09
+    }
+  }
+}

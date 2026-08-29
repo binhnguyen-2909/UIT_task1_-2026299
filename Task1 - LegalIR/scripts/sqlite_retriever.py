@@ -20,11 +20,17 @@ import numpy as np
 
 try:
     from .bm25_retriever import VietnameseTokenizer, expand_query
+    from .data_quality import (
+        load_raw_training_records,
+        load_training_records,
+        normalize_corpus_text,
+    )
     from .legal_structure import iter_index_chunks
     from .reranker import Reranker, reciprocal_rank_fuse
     from .retrieval_types import QueryResult, RetrievalResult
 except ImportError:
     from bm25_retriever import VietnameseTokenizer, expand_query
+    from data_quality import load_raw_training_records, load_training_records, normalize_corpus_text
     from legal_structure import iter_index_chunks
     from reranker import Reranker, reciprocal_rank_fuse
     from retrieval_types import QueryResult, RetrievalResult
@@ -716,21 +722,32 @@ class SQLiteFTSRetriever:
 
     FTS5 streams to disk and therefore remains usable for the official corpus,
     unlike a dense ``chunks × vocabulary`` TF-IDF matrix.
+
+    V60 Enhancements:
+    - Legal-aware BM25F weights (title=5.0)
+    - Enhanced chunk phrase weight (0.35)
+    - Citation-aware retrieval
+    - Tuned dense/reranker weights
     """
 
-    BACKEND = "sqlite_chunk_fts5_v5_document_phrase_rrf"
+    BACKEND = "sqlite_chunk_fts5_v6_legal_enhanced"
     DOCUMENT_BASE_WEIGHT = 1.0
-    DOCUMENT_PHRASE_WEIGHT = 0.25
+    DOCUMENT_PHRASE_WEIGHT = 0.35  # V60: increased from 0.25
     DOCUMENT_RRF_K = 0
     DOCUMENT_PHRASE_PAIR_LIMIT = 16
     DOCUMENT_PHRASE_RESULT_LIMIT = 80
 
     # Chunk-level phrase fusion: weight/k tuned leak-free on holdout 100.
+    # V60: Slightly higher chunk phrase weight for better exact phrase matching
     CHUNK_PHRASE_BASE_WEIGHT = 1.0
-    CHUNK_PHRASE_WEIGHT = 0.25
+    CHUNK_PHRASE_WEIGHT = 0.35  # V60: increased from 0.25
     CHUNK_PHRASE_RRF_K = 0
     CHUNK_PHRASE_PAIR_LIMIT = 16
     CHUNK_PHRASE_RESULT_LIMIT = 80
+
+    # V60: Citation matching weight (strong signal for legal documents)
+    CITATION_MATCH_WEIGHT = 2.0
+    CITATION_RRF_K = 10
 
     def __init__(
         self,
@@ -740,7 +757,8 @@ class SQLiteFTSRetriever:
         device: Optional[str] = None,
         top_k_initial: int = 100,
         use_query_expansion: bool = False,
-        title_weight: float = 3.0,
+        # V60: Enhanced title weight for legal structure priority
+        title_weight: float = 5.0,
         alias_weight: float = 2.0,
         passage_weight: float = 1.0,
         question_weight: float = 4.0,
@@ -766,17 +784,26 @@ class SQLiteFTSRetriever:
         dense_max_seq_length: int = 384,
         dense_query_prefix: str = "",
         dense_passage_prefix: str = "",
-        dense_weight: float = 1.0,
+        # V60: Dense weight kept small but tunable
+        dense_weight: float = 0.08,
         dense_rrf_k: int = 60,
         dense_max_chunks_per_doc: int = 4,
         question_dense_weight: float = 0.02,
         question_dense_rrf_k: int = 60,
         question_dense_candidates: int = 20,
-        rerank_candidates: int = 35,
-        rerank_passages_per_doc: int = 2,
+        # V60: Increased candidates for better reranking
+        rerank_candidates: int = 50,
+        # V60: More passages per doc for better coverage
+        rerank_passages_per_doc: int = 3,
         reranker_batch_size: int = 16,
         reranker_max_length: Optional[int] = None,
-        reranker_rrf_weight: float = 0.8,
+        reranker_aggregation: str = "max",
+        reranker_fp16: bool = False,
+        adaptive_rerank: bool = False,
+        normalize_corpus: bool = False,
+        clean_training_data: bool = False,
+        # V60: Slightly higher reranker weight
+        reranker_rrf_weight: float = 0.85,
         reranker_rrf_k: int = 5,
     ):
         self.db_path = Path(db_path)
@@ -845,8 +872,14 @@ class SQLiteFTSRetriever:
         self.reranker_max_length = (
             int(reranker_max_length) if reranker_max_length is not None else None
         )
+        self.reranker_aggregation = str(reranker_aggregation)
+        self.reranker_fp16 = bool(reranker_fp16)
+        self.adaptive_rerank = bool(adaptive_rerank)
+        self.normalize_corpus = bool(normalize_corpus)
+        self.clean_training_data = bool(clean_training_data)
         self.reranker_rrf_weight = float(reranker_rrf_weight)
         self.reranker_rrf_k = int(reranker_rrf_k)
+        self.last_stage1_candidates: List[Dict[str, Any]] = []
         if self.dense_weight < 0 or self.dense_rrf_k < 0 or self.dense_max_chunks_per_doc <= 0:
             raise ValueError("Dense weight must be non-negative and dense RRF k non-negative")
         if (
@@ -882,6 +915,8 @@ class SQLiteFTSRetriever:
                 device=device,
                 batch_size=self.reranker_batch_size,
                 max_length=self.reranker_max_length,
+                passage_aggregation=self.reranker_aggregation,
+                use_fp16=self.reranker_fp16,
             )
         else:
             self.reranker = None
@@ -889,14 +924,42 @@ class SQLiteFTSRetriever:
         self._document_connection: Optional[sqlite3.Connection] = None
         self._document_count: Optional[int] = None
         self._question_ngram_cache: Optional[Dict[str, Any]] = None
+        # V60: Legal citation patterns
+        self._citation_pattern = re.compile(
+            r"(?<!\w)(?:Điều|Khoản|Điểm|Mục)\s+\d+[a-zđ]?(?:\s*[.,:;]\s*\d+[a-zđ]?)*",
+            re.IGNORECASE
+        )
+        self._doc_number_pattern = re.compile(
+            r"(?<!\w)\d{1,6}\s*[/\-]\s*\d{4}\s*[/\-]?"
+            r"(?:NĐ|NQ|Luật|Decree|Law|QĐ|Circular)?\s*"
+            r"[A-ZĐÂĂÊÔƠƯ]{0,3}(?:\s*[/\-]?\s*[A-ZĐÂĂÊÔƠƯ]{0,3}){0,2}(?!\w)",
+            re.IGNORECASE
+        )
 
     def _connect(self, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
             uri = self.db_path.resolve().as_uri() + "?mode=ro"
-            connection = sqlite3.connect(uri, uri=True)
+            # Parallel Stage-1 benchmarking owns one connection per worker
+            # and closes them from the coordinator after futures complete.
+            connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
         else:
             connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        # The official corpus database is close to 1 GB and every query fans
+        # out over several FTS5 virtual tables. Keep the read-only inference
+        # connection warm without changing any ranking signal. SQLite accepts
+        # these pragmas on older builds too; a read-only build may reject one,
+        # so fall back to the default safely.
+        if readonly:
+            for pragma in (
+                "PRAGMA cache_size=-524288",
+                "PRAGMA temp_store=MEMORY",
+                "PRAGMA mmap_size=2147483648",
+            ):
+                try:
+                    connection.execute(pragma)
+                except sqlite3.DatabaseError:
+                    pass
         return connection
 
     @property
@@ -968,7 +1031,19 @@ class SQLiteFTSRetriever:
         building = self.db_path.with_suffix(self.db_path.suffix + ".building")
         if building.exists():
             building.unlink()
-        aliases, memory, priors = load_training_signals(train_data)
+        if self.clean_training_data:
+            training_records, training_quality = load_training_records(train_data)
+        else:
+            training_records = load_raw_training_records(train_data)
+            training_quality = {
+                "enabled": False,
+                "input_records": len(training_records),
+                "clean_records": len(training_records),
+                "duplicate_question_rows_merged": 0,
+                "conflicting_duplicate_groups_unioned": 0,
+                "skipped_invalid_rows": 0,
+            }
+        aliases, memory, priors = training_signals_from_data(training_records)
         connection = sqlite3.connect(building)
         try:
             connection.executescript("""
@@ -1014,6 +1089,9 @@ class SQLiteFTSRetriever:
                 passage = record.get("passage")
                 passage = passage if isinstance(passage, str) else ""
                 title = display_title(record)
+                if self.normalize_corpus:
+                    passage = normalize_corpus_text(passage)
+                    title = normalize_corpus_text(title)
                 if not passage.strip():
                     empty_passages += 1
                     passage = title or f"văn bản {doc_id}"
@@ -1066,11 +1144,6 @@ class SQLiteFTSRetriever:
                 "INSERT INTO question_memory(question, answers) VALUES (?, ?)",
                 ((question, json.dumps(answers)) for question, answers in sorted(memory.items())),
             )
-            training_records: Dict[str, Any] = {}
-            if train_data:
-                loaded_training = json.loads(Path(train_data).read_text(encoding="utf-8"))
-                if isinstance(loaded_training, dict):
-                    training_records = loaded_training
             connection.executemany(
                 "INSERT INTO question_examples(question_id, answers, question) VALUES (?, ?, ?)",
                 (
@@ -1087,6 +1160,7 @@ class SQLiteFTSRetriever:
                 "training_alias_documents": len(aliases),
                 "question_memory_entries": len(memory),
                 "training_question_examples": len(training_records),
+                "training_quality": training_quality,
                 "build_seconds": time.perf_counter() - started,
                 "title_weight": self.title_weight,
                 "alias_weight": self.alias_weight,
@@ -1131,6 +1205,11 @@ class SQLiteFTSRetriever:
             connection.close()
         building.replace(self.db_path)
 
+        # Persist the index contract before the expensive optional dense pass.
+        # If embedding is interrupted, --reuse-index can resume from the
+        # checkpoint without rebuilding the 1 GB SQLite FTS database.
+        self._write_config()
+
         # ── Dense embedding index ────────────────────────────────────────────
         if self._dense is not None:
             # Collect all chunks we just inserted (we already iterated them above,
@@ -1141,6 +1220,9 @@ class SQLiteFTSRetriever:
                 passage = record.get("passage")
                 passage = passage if isinstance(passage, str) else ""
                 title = display_title(record)
+                if self.normalize_corpus:
+                    passage = normalize_corpus_text(passage)
+                    title = normalize_corpus_text(title)
                 if not passage.strip():
                     passage = title or f"văn bản {doc_id}"
                 for chunk_id, chunk in enumerate(
@@ -1283,6 +1365,11 @@ class SQLiteFTSRetriever:
             "rerank_passages_per_doc": self.rerank_passages_per_doc,
             "reranker_batch_size": self.reranker_batch_size,
             "reranker_max_length": self.reranker_max_length,
+            "reranker_aggregation": self.reranker_aggregation,
+            "reranker_fp16": self.reranker_fp16,
+            "adaptive_rerank": self.adaptive_rerank,
+            "normalize_corpus": self.normalize_corpus,
+            "clean_training_data": self.clean_training_data,
             "reranker_rrf_weight": self.reranker_rrf_weight,
             "reranker_rrf_k": self.reranker_rrf_k,
             "chunk_size": self.chunk_size,
@@ -1306,8 +1393,13 @@ class SQLiteFTSRetriever:
         rerank_passages_per_doc: Optional[int] = None,
         reranker_batch_size: Optional[int] = None,
         reranker_max_length: Optional[int] = None,
+        reranker_fp16: Optional[bool] = None,
         reranker_rrf_weight: Optional[float] = None,
         reranker_rrf_k: Optional[int] = None,
+        reranker_aggregation: Optional[str] = None,
+        adaptive_rerank: Optional[bool] = None,
+        normalize_corpus: Optional[bool] = None,
+        clean_training_data: Optional[bool] = None,
     ) -> "SQLiteFTSRetriever":
         db_path = Path(db_path)
         config = json.loads(db_path.with_suffix(".config.json").read_text(encoding="utf-8"))
@@ -1326,7 +1418,8 @@ class SQLiteFTSRetriever:
             device=device,
             top_k_initial=config["top_k_initial"],
             use_query_expansion=config["use_query_expansion"],
-            title_weight=config["title_weight"],
+            # V60: Use config values with V60 defaults for missing keys
+            title_weight=config["title_weight"] if "title_weight" in config else 5.0,
             alias_weight=config["alias_weight"],
             passage_weight=config["passage_weight"],
             question_weight=config.get("question_weight", 4.0),
@@ -1351,19 +1444,21 @@ class SQLiteFTSRetriever:
             dense_max_seq_length=config.get("dense_max_seq_length", 384),
             dense_query_prefix=config.get("dense_query_prefix", ""),
             dense_passage_prefix=config.get("dense_passage_prefix", ""),
-            dense_weight=config.get("dense_weight", 1.0),
+            # V60: Default 0.08 for dense weight
+            dense_weight=config.get("dense_weight", 0.08),
             dense_rrf_k=config.get("dense_rrf_k", 60),
             dense_max_chunks_per_doc=config.get("dense_max_chunks_per_doc", 4),
             question_dense_weight=config.get("question_dense_weight", 0.0),
             question_dense_rrf_k=config.get("question_dense_rrf_k", 60),
             question_dense_candidates=config.get("question_dense_candidates", 20),
+            # V60: Increased defaults for reranking
             rerank_candidates=(
                 rerank_candidates if rerank_candidates is not None
-                else config.get("rerank_candidates", 35)
+                else config.get("rerank_candidates", 50)
             ),
             rerank_passages_per_doc=(
                 rerank_passages_per_doc if rerank_passages_per_doc is not None
-                else config.get("rerank_passages_per_doc", 2)
+                else config.get("rerank_passages_per_doc", 3)
             ),
             reranker_batch_size=(
                 reranker_batch_size if reranker_batch_size is not None
@@ -1374,9 +1469,35 @@ class SQLiteFTSRetriever:
                 if reranker_max_length is not None
                 else config.get("reranker_max_length")
             ),
+            reranker_aggregation=(
+                reranker_aggregation
+                if reranker_aggregation is not None
+                else config.get("reranker_aggregation", "max")
+            ),
+            reranker_fp16=(
+                bool(reranker_fp16)
+                if reranker_fp16 is not None
+                else bool(config.get("reranker_fp16", False))
+            ),
+            adaptive_rerank=(
+                bool(adaptive_rerank)
+                if adaptive_rerank is not None
+                else bool(config.get("adaptive_rerank", False))
+            ),
+            normalize_corpus=(
+                bool(normalize_corpus)
+                if normalize_corpus is not None
+                else bool(config.get("normalize_corpus", False))
+            ),
+            clean_training_data=(
+                bool(clean_training_data)
+                if clean_training_data is not None
+                else bool(config.get("clean_training_data", False))
+            ),
+            # V60: Default 0.85 for reranker weight
             reranker_rrf_weight=(
                 reranker_rrf_weight if reranker_rrf_weight is not None
-                else config.get("reranker_rrf_weight", 0.8)
+                else config.get("reranker_rrf_weight", 0.85)
             ),
             reranker_rrf_k=(
                 reranker_rrf_k if reranker_rrf_k is not None
@@ -1780,6 +1901,140 @@ class SQLiteFTSRetriever:
             key=lambda item: (-float(item["score"]), item["doc_id"]),
         )[: self.top_k_initial]
 
+    # =========================================================================
+    # V60: Legal Citation and Document Number Matching
+    # =========================================================================
+
+    def _extract_legal_entities(self, query: str) -> Dict[str, List[str]]:
+        """Extract legal citations and document numbers from query.
+
+        Returns dict with 'citations' and 'doc_numbers' lists.
+        """
+        # Extract legal references: Điều, Khoản, Điểm, Mục
+        citations = self._citation_pattern.findall(query)
+
+        # Extract document numbers: Nghị định 45/2021, Luật 37/QH15, etc.
+        doc_numbers = self._doc_number_pattern.findall(query)
+
+        return {
+            "citations": [c.casefold().strip() for c in citations],
+            "doc_numbers": [n.strip() for n in doc_numbers],
+        }
+
+    def _citation_candidates(self, query: str) -> List[Dict[str, Any]]:
+        """Find documents containing legal citations from query.
+
+        V60: Boost documents that contain citations referenced in the query.
+        This helps when the question mentions "theo Điều 10 Luật X" but
+        the actual answer is a different document that cites that reference.
+        """
+        entities = self._extract_legal_entities(query)
+        citations = entities["citations"]
+        doc_numbers = entities["doc_numbers"]
+
+        if not citations and not doc_numbers:
+            return []
+
+        # Build FTS expression for citations and doc numbers
+        terms = []
+        for citation in citations:
+            # Normalize citation for FTS matching
+            normalized = re.sub(r"\s+", " ", citation).strip()
+            terms.append(normalized)
+
+        for doc_num in doc_numbers:
+            # Clean up document number
+            cleaned = re.sub(r"\s+", "", doc_num).strip()
+            if cleaned:
+                terms.append(cleaned)
+
+        if not terms:
+            return []
+
+        # Query FTS for matching chunks
+        all_candidates: Dict[str, Dict[str, Any]] = {}
+        for term in terms:
+            # Try exact phrase match
+            escaped = f'"{term.replace(chr(34), chr(34) * 2)}"'
+            try:
+                rows = list(self.connection.execute(
+                    """
+                    SELECT doc_id, chunk_id, title,
+                           snippet(chunks, 3, '', '', ' … ', 64) AS evidence,
+                           -bm25(chunks, 0.0, 0.0, 3.0, 1.0) AS score
+                    FROM chunks WHERE chunks MATCH ?
+                    ORDER BY bm25(chunks, 0.0, 0.0, 3.0, 1.0), doc_id
+                    LIMIT 20
+                    """,
+                    (escaped,),
+                ))
+                for row in rows:
+                    doc_id = str(row["doc_id"])
+                    if doc_id not in all_candidates:
+                        all_candidates[doc_id] = {
+                            "doc_id": doc_id,
+                            "chunk_id": str(row["chunk_id"]),
+                            "text": "\n".join(v for v in (row["title"], row["evidence"]) if v),
+                            "score": self.CITATION_MATCH_WEIGHT / (self.CITATION_RRF_K + 1),
+                            "raw_fts_score": float(row["score"]),
+                            "method": "sqlite_citation_match",
+                            "evidence_kind": "citation",
+                            "matched_terms": [term],
+                        }
+                    else:
+                        all_candidates[doc_id]["score"] = max(
+                            all_candidates[doc_id]["score"],
+                            self.CITATION_MATCH_WEIGHT / (self.CITATION_RRF_K + 1)
+                        )
+                        all_candidates[doc_id]["matched_terms"].append(term)
+            except sqlite3.OperationalError:
+                continue
+
+        return sorted(
+            all_candidates.values(),
+            key=lambda x: (-float(x["score"]), x["doc_id"])
+        )[: self.top_k_initial]
+
+    def _fuse_citation_candidates(
+        self,
+        base_candidates: List[Dict[str, Any]],
+        citation_candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Fuse citation matching into the main ranking.
+
+        V60: Citation matches are strong legal signals and get dedicated
+        RRF fusion with the base candidates.
+        """
+        if not citation_candidates:
+            return base_candidates
+
+        by_id = {item["doc_id"]: dict(item) for item in base_candidates}
+        fused: Dict[str, float] = {}
+
+        # Base candidates
+        for rank, item in enumerate(base_candidates, 1):
+            doc_id = item["doc_id"]
+            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (20.0 + rank)
+
+        # Citation candidates
+        for rank, item in enumerate(citation_candidates, 1):
+            doc_id = item["doc_id"]
+            fused[doc_id] = fused.get(doc_id, 0.0) + (
+                self.CITATION_MATCH_WEIGHT / (self.CITATION_RRF_K + rank)
+            )
+            if doc_id not in by_id:
+                by_id[doc_id] = dict(item)
+            else:
+                by_id[doc_id]["method"] = "sqlite_citation_fusion"
+
+        for doc_id, score in fused.items():
+            by_id[doc_id]["score"] = score
+
+        return sorted(
+            by_id.values(),
+            key=lambda item: (-float(item["score"]), item["doc_id"]),
+        )[: self.top_k_initial]
+
     def _or_bm25_candidates(self, tokens: List[str]) -> List[Dict[str, Any]]:
         """Retrieve a high-recall list with a bounded OR query over passage chunks.
 
@@ -2133,6 +2388,14 @@ class SQLiteFTSRetriever:
         self._hydrate_candidate_text(candidates)
         _, tokens = self._match_expression(query)
         selected: Dict[str, List[str]] = defaultdict(list)
+        # Keep evidence already produced by the retrieval branches, then add
+        # complementary full chunks from the same official document.
+        for item in candidates:
+            doc_id = str(item["doc_id"])
+            for passage in item.get("passages", ()):
+                value = str(passage).strip()
+                if value and value not in selected[doc_id] and len(selected[doc_id]) < limit:
+                    selected[doc_id].append(value)
         if tokens:
             expression = " OR ".join(
                 f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens
@@ -2169,7 +2432,13 @@ class SQLiteFTSRetriever:
                 passages.append(fallback)
             item["passages"] = passages or [fallback]
 
-    def retrieve(self, query: str, query_id: str = "", top_k: int = 5) -> QueryResult:
+    def retrieve(
+        self,
+        query: str,
+        query_id: str = "",
+        top_k: int = 5,
+        query_embedding: Optional[np.ndarray] = None,
+    ) -> QueryResult:
         if not 1 <= top_k <= 5:
             raise ValueError("BTC Task 1 permits 1 to 5 predictions")
         started = time.perf_counter()
@@ -2192,6 +2461,11 @@ class SQLiteFTSRetriever:
             candidates, document_phrase_candidates
         )
 
+        # ── V60: Citation matching branch ───────────────────────────────────
+        # Boost documents containing legal citations referenced in the query
+        citation_candidates = self._citation_candidates(query)
+        candidates = self._fuse_citation_candidates(candidates, citation_candidates)
+
         # ── Dense branch ─────────────────────────────────────────────────────
         # DenseCache uses a checkpointed NumPy index, so FAISS is optional and
         # not required for a clean install on the competition machine.
@@ -2202,7 +2476,8 @@ class SQLiteFTSRetriever:
                 dense_path = self.db_path.parent / "dense_embeddings"
                 self._dense.load(dense_path)
             if self._dense._embeddings is not None:
-                query_embedding = self._dense.encode_query(query)
+                if query_embedding is None:
+                    query_embedding = self._dense.encode_query(query)
                 dense_candidates = self._dense.retrieve_embedding(
                     query_embedding, top_k=self.top_k_initial
                 )
@@ -2244,6 +2519,9 @@ class SQLiteFTSRetriever:
             candidates = exact + [
                 item for item in candidates if item["doc_id"] not in memory_ids
             ]
+        # Preserve the pre-reranker candidate pool for leak-free oracle audits.
+        # This is diagnostic state only and does not affect final ranking.
+        self.last_stage1_candidates = [dict(item) for item in candidates]
         if self.reranker is not None:
             locked = candidates[:len(memory_answers)] if memory_answers else []
             locked_ids = {str(item["doc_id"]) for item in locked}
@@ -2262,6 +2540,16 @@ class SQLiteFTSRetriever:
                 ),
                 self.rerank_passages_per_doc,
             )
+            if self.adaptive_rerank:
+                # Stage A supplies one best hit per document. Stage B adds
+                # neighboring/query-focused legal units before CrossEncoder
+                # scoring, so a correct document is not lost due to a
+                # two-passage quota.
+                self._hydrate_candidate_passages(
+                    query,
+                    shortlist,
+                    self.rerank_passages_per_doc,
+                )
             reranked = self.reranker.rerank(
                 query,
                 shortlist,
@@ -2351,6 +2639,13 @@ class SQLiteFTSRetriever:
                     "rrf_k": self.CHUNK_PHRASE_RRF_K,
                     "pair_limit": self.chunk_phrase_pair_limit,
                     "result_limit": self.chunk_phrase_result_limit,
+                },
+                # V60: Citation matching
+                "citation": {
+                    "enabled": True,
+                    "candidates": len(citation_candidates),
+                    "weight": self.CITATION_MATCH_WEIGHT,
+                    "rrf_k": self.CITATION_RRF_K,
                 },
                 "fusion": {
                     "base_weight": self.base_fusion_weight,
