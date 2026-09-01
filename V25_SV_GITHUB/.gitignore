@@ -1,0 +1,18 @@
+# Private experiment assets and generated output
+assets/
+models/
+output/
+
+# Model and database artifacts
+*.sqlite3
+*.safetensors
+*.tmp
+
+# Python and OS files
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+Thumbs.db
+

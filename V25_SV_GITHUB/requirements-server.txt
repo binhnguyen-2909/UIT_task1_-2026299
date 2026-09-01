@@ -1,0 +1,9 @@
+# Install a CUDA-compatible PyTorch build separately for the server GPU.
+# Local validation used Python 3.10, PyTorch 2.5.1+cu124, and BF16.
+transformers==5.13.1
+peft==0.20.0
+accelerate
+safetensors
+sentencepiece
+huggingface_hub
+
