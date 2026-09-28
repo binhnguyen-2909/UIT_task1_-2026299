@@ -1,0 +1,199 @@
+{
+  "contract": {
+    "bootstrap_lower_min": 0.004,
+    "four_regimes_non_negative": true,
+    "mutable_slots": [
+      4,
+      5
+    ],
+    "net_query_equivalents_min": 15,
+    "neutral_selected_max": 4,
+    "oof_gain_min": 0.012,
+    "precision_min": 0.9,
+    "robust_gain_min": 0.01,
+    "top3_byte_identical": true,
+    "worst_fold_min": -0.002
+  },
+  "cross_fit": {
+    "calibration_harm_max": 1,
+    "calibration_improvements_min": 5,
+    "calibration_precision_min": 0.9,
+    "gain_score": "P(IMPROVE)-P(HARM)",
+    "inner_fit_fraction": 0.8,
+    "inner_split": "group_hash",
+    "no_regime_vote_or_veto": true,
+    "outer_folds": 5,
+    "regimes": [
+      "standard_grouped",
+      "law_family_ood",
+      "query_template_ood",
+      "near_duplicate_ood"
+    ]
+  },
+  "edit_supervision": {
+    "classes": [
+      "IMPROVE",
+      "TIE",
+      "HARM"
+    ],
+    "examples_per_class_per_source_query": 2,
+    "missing_class_backfill": false,
+    "query_weight_after_reversal": 1.0,
+    "rank_margin": "absolute mean V16b anchor-score change over mutable slots",
+    "reverse_order_duplication": true
+  },
+  "holdout_opened": false,
+  "inputs": {
+    "anchor_checksum": "e8c86a2d254ada2640d0ce5134bdac3e664cbe2e70262544d05adfea4a1b0dd3",
+    "contexts_database_path": "D:\\projects\\UIT DSC\\Task1 - LegalIR\\data\\processed\\v11_research_complement_256\\legalir.sqlite3",
+    "fold_manifest_path": "D:\\projects\\UIT DSC\\Task1 - LegalIR\\output\\v21_p3_gx\\fold_manifest.json",
+    "hashes": {
+      "contexts_database": "c78d7aeda29efc43ef304420a039347f2aa699312621525854eaba04e292ea09",
+      "fold_manifest": "49da0798f9cb42775d209e933031a7591b2a92beafc534f640bc97e45e78b16b",
+      "metadata": "50b9d43636fde08085697f526b2fbfffd2f5e68664e539730d871f0377b5c948",
+      "preregistration": "fb8da78d3be0c720155199c3d22b8131e04132b1409ba8d149679371c6ca5629",
+      "v23_b0_edit_rows": "f168e750863b1fb5c57775c4ffb51812171fa23c5fa2f528d845c1515aa31833",
+      "v23_b0_report": "250163604ac4fe1d842e16023bf7805af388bffca26ab0617733d255cabcd784"
+    },
+    "metadata_path": "D:\\projects\\UIT DSC\\Task1 - LegalIR\\archive\\2026-08-31_retired_experiments\\Task1-output\\v18b_evidence_packs_corrected_r3\\v18b_metadata.json",
+    "model_file_hashes": {
+      "config.json": "15a1d64fb1c3b7f89de903384fba1318dd83ce8a20928577eddacb859c5ee1b2",
+      "generation_config.json": "1eda4b9d9aa01d3ab542c31da65585e120a0135ca28b0f839a47101c0450f66b",
+      "model-00001-of-00003.safetensors": "a119947d80889086442f1f165fa8ec5debd849aa0e83a6cfb417b621fc706b6c",
+      "model-00002-of-00003.safetensors": "d6aef5ed60f1410600a17b63de134b7ddef3a8f611e2ed1d62225ac4dacc13df",
+      "model-00003-of-00003.safetensors": "64a1c520e62df78ef25b4f066b746447dc4d58d0d3d37efa419c8ec8462e133b",
+      "model.safetensors.index.json": "0c311bfc2b104ec1ddca7339d2264abce9d4c8895025eeb500b5c32734214a90",
+      "special_tokens_map.json": "db82f8bd9b25d14f9c788e6bde64de84d42f1c2538f1c245ba6cb3e872d14b18",
+      "tokenizer.json": "d0d908b4f9326e0998815690e325b6abbd378978553e10627924dd825db7e243",
+      "tokenizer.model": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+      "tokenizer_config.json": "acb0c767881929483d11af25020fc4744c474eed09101a5752d4d443a13d3e55"
+    },
+    "preregistration_path": "C:\\Users\\Lenovo\\Downloads\\V25_BGE_Gemma_Semantic_Swap_Verifier_PREREGISTRATION.md",
+    "qrel_checksum": "bb6a596696ce74dd3d2232b1d57f7e70ab4b19fb19b95fc059850ecf4e277bb8",
+    "v23_b0_edit_rows_path": "D:\\projects\\UIT DSC\\Task1 - LegalIR\\output\\v23_b0\\v23_b0_edit_rows.jsonl",
+    "v23_b0_report_path": "D:\\projects\\UIT DSC\\Task1 - LegalIR\\output\\v23_b0\\v23_b0_report.json"
+  },
+  "kind": "legalir_v25_sv_resolved_config",
+  "lora": {
+    "alpha": 64,
+    "dropout": 0.05,
+    "rank": 32,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "tensor_shapes": {
+      "edit_head": [
+        3,
+        2048
+      ],
+      "k_proj.lora_A": [
+        32,
+        2048
+      ],
+      "k_proj.lora_B": [
+        256,
+        32
+      ],
+      "o_proj.lora_A": [
+        32,
+        2048
+      ],
+      "o_proj.lora_B": [
+        2048,
+        32
+      ],
+      "q_proj.lora_A": [
+        32,
+        2048
+      ],
+      "q_proj.lora_B": [
+        2048,
+        32
+      ],
+      "v_proj.lora_A": [
+        32,
+        2048
+      ],
+      "v_proj.lora_B": [
+        256,
+        32
+      ]
+    }
+  },
+  "model": {
+    "architecture": "GemmaForCausalLM",
+    "dtype": "bfloat16",
+    "exact_parameter_count": 2506172416,
+    "hidden_size": 2048,
+    "local_dir": "D:\\projects\\UIT DSC\\models\\bge-reranker-v2-gemma-1787044f",
+    "num_hidden_layers": 18,
+    "parameter_ledger": {
+      "bge_gemma": 2506172416,
+      "lora_and_head": 7378944,
+      "under_4b": true,
+      "v16b": 1090010000,
+      "worst_case_total": 3603561360
+    },
+    "repository": "BAAI/bge-reranker-v2-gemma",
+    "revision": "1787044f8b6fb740a9de4557c3a12377f84d9e17"
+  },
+  "public_labels_used": false,
+  "raw_evidence": {
+    "block_overlap_tokens": 48,
+    "block_score_instruction": "Với câu hỏi pháp lý A và đoạn bằng chứng pháp lý B, hãy xác định B có chứa câu trả lời cho A hay không. Chỉ trả lời 'Yes' hoặc 'No'.",
+    "block_scoring_batch_size": 8,
+    "block_tokens": 192,
+    "inference_device": "cuda",
+    "instruction_tokens_max": 64,
+    "max_sequence_length": 1024,
+    "original_evidence_tokens_max": 384,
+    "proposed_evidence_tokens_max": 384,
+    "query_tokens_max": 192,
+    "retained_blocks_per_document": 2,
+    "tie_break": "earliest block ID",
+    "tokens_per_document_evidence": 192,
+    "tokens_per_retained_block": 96,
+    "truncation": "from the end of the lowest-scoring retained block; query is never truncated first",
+    "verifier_control_token_budget": 63,
+    "verifier_document_evidence_tokens": 192,
+    "verifier_eval_batch_size": 1,
+    "verifier_query_token_budget": 192
+  },
+  "resolved_config_sha256": "91b0e9bb9103e121c0077e0dd8dd1415f28e55e5863365d03645fd08397d62a0",
+  "schema_version": 1,
+  "software": {
+    "deterministic_algorithms": true,
+    "peft": "0.19.1",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.0",
+    "torch": "2.5.1+cu121",
+    "transformers": "5.13.1"
+  },
+  "split": "clean_complement_only",
+  "status": "sealed_before_forward_pass",
+  "tokenizer": {
+    "padding_side": "left",
+    "revision": "1787044f8b6fb740a9de4557c3a12377f84d9e17",
+    "tokenizer_json_sha256": "d0d908b4f9326e0998815690e325b6abbd378978553e10627924dd825db7e243",
+    "tokenizer_model_sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+  },
+  "training": {
+    "checkpoint_selection": "final_step_only",
+    "class_costs": {
+      "HARM": 2.0,
+      "IMPROVE": 1.0,
+      "TIE": 0.5
+    },
+    "effective_batch_queries": 32,
+    "epochs": 1,
+    "learning_rate": 2e-05,
+    "max_gradient_norm": 1.0,
+    "precision": "bf16",
+    "seed": 20260901,
+    "warmup_ratio": 0.05,
+    "weight_decay": 0.01
+  }
+}

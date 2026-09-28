@@ -1,16 +1,16 @@
-# UIT DSC Task 1 — LegalIR v11h main
+# UIT DSC Task 1 — LegalIR V16b release
 
-Pipeline chính hiện tại là **v11h**, được thiết kế để chạy lại end-to-end dưới
-giới hạn 4B tham số. V10 chỉ được giữ làm baseline/fallback; v57 exact10 được
-giữ để tham khảo thuật toán vì lineage đầy đủ của v57 vượt ngân sách 4B.
-Runner nộp/trình bày là một file duy nhất; bên trong có ba stage nội bộ F → G → H
-để giữ đúng logic và thứ tự tái lập.
+Pipeline chính hiện tại là **V16b**: V11h retrieval/reranking/fusion cộng
+QREL-memory gate chỉ được phép đổi slot 5. Nó giữ đầy đủ end-to-end dưới giới
+hạn 4B tham số; V11h được giữ làm anchor/fallback. Capsule tái lập, checksum,
+và quyết định dừng promotion nằm tại `release/v16b_0921/README.md`.
 
 ## Trạng thái submission
 
 | File | Điểm/metric đã biết | Trạng thái |
 |---|---:|---|
-| `output/v11h.zip` | public **`0.9183`**; locked holdout `0.9188333` | **Main compliant** |
+| `output/v16b_memory_slot5.zip` | public **`0.9210`**; locked holdout `0.9228333` | **Main frozen release** |
+| `output/v11h.zip` | public **`0.9183`**; locked holdout `0.9188333` | **Frozen V16b anchor/fallback** |
 | `output/v11g.zip` | public `0.9086`; locked holdout `0.9120000` | Ablation feature v1 |
 | `output/v11f.zip` | public `0.9106`; locked holdout `0.9079167` | Fallback compliant trước PRF |
 | v57 exact10 | public `0.9190` | Chỉ tham khảo thuật toán; end-to-end >4B |
@@ -48,7 +48,13 @@ trong `0.000534`, cho thấy gate hiện tại transfer tốt hơn các bản tr
 
 ## Chạy lại
 
-Runner v11h end-to-end (tự bỏ qua cache hợp lệ đã có, dùng RTK cho output lớn):
+Runner V16b end-to-end (gọi V11h, ba memory splits, slot-5 gate, rồi đóng gói):
+
+```powershell
+Task1 - LegalIR\release\v16b_0921\run_release.ps1 -Device cuda
+```
+
+Runner V11h riêng (tự bỏ qua cache hợp lệ đã có, dùng RTK cho output lớn):
 
 ```powershell
 Task1 - LegalIR\experiments\track_b_v11_research\run_v11h_end_to_end.ps1 -Device cuda
@@ -86,4 +92,11 @@ Chi tiết command, leakage gate, metric và artifact nằm trong
 
 - Các kết quả V10/V57 và toàn bộ ablation được ghi trong
   `EXPERIMENT_LOG.md`, `CURRENT_STATE.md` và các disclosure. Không dùng
-  checkpoint/prediction cũ trong v11h; chỉ tái sử dụng ý tưởng đã qua gate.
+checkpoint/prediction cũ trong v11h; chỉ tái sử dụng ý tưởng đã qua gate.
+
+## Retired research
+
+V16d--V20 diagnostics and rejected selector/LoRA branches are recoverably
+quarantined in `archive/2026-08-31_retired_experiments/`. They are not valid
+submission candidates. The concrete transfer, leakage, parity, and coverage
+bottlenecks are recorded in `release/v16b_0921/LESSONS_AND_BOTTLENECKS.md`.

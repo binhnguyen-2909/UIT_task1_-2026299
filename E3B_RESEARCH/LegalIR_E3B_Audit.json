@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "scope": "complement-only arithmetic audit of supplied predictions; not a new model evaluation",
+  "queries": 1197,
+  "model_training_run": false,
+  "model_inference_run": false,
+  "holdout_opened": false,
+  "public_opened": false,
+  "e3b_evaluated": false,
+  "source_sha256": {
+    "anchor": "dd2c7540017de8c728ca1b05f46af73ec33d99306020e320f96fd91e133f7c28",
+    "stage1": "4b16c3716405880fcf15a5ec5f207e7ca23a7ac9b76a0e585b9ab46a99e9f6c0",
+    "stage2": "18c6b38c2eaeb8f054d5a0f809d573fc2ef918abe12540956eb5027f60fd737f",
+    "reference_used": "34d872de1fea184c47fa4748879e366388a16576df6fe89efd7d07b01578248c",
+    "e2_standard_report": "6e17b514173d321b43df0c34d93b59ce89ce2428e94c065b415436849196dac2",
+    "e2_stress_report": "f88da09b15c156b49df603e9c3d33b38768b131bc07cee52d6f2c67f587822d2",
+    "e3_report": "5767d88b0a5bb68ca932ef2f55dd50413ee831280eabdeb9db11ebe0a366e769",
+    "e3_preflight": "1af5c3c1f250fdb6e33b304f07bb07bdbb857752d612881160d9af1ad849365d"
+  },
+  "verified_against_e3_preflight": [
+    "anchor",
+    "stage1",
+    "stage2"
+  ],
+  "reference_provenance_note": "Reference used is supplied complement_queries_1200.json restricted to anchor QIDs. E3 input contract does not contain a reference hash.",
+  "metric_units": "Recall values and gains are raw fractions; multiply gain by 100 for percentage points",
+  "oracle_note": "Label-informed structural upper bound with V16b top-4 frozen and anchor fallback; not deployable predictions, not a forecast for public/private",
+  "results": {
+    "standard": {
+      "counts": {
+        "rescuable_in_c35": 89,
+        "rescuable_by_nominations": 52,
+        "rescuable_by_union_top5": 66,
+        "queries_with_nomination": 1166,
+        "two_seed_nomination_agreement": 906,
+        "nominations_where_incumbent_ranked_above": 444
+      },
+      "bounds": {
+        "baseline": 0.8860623781676413,
+        "c35_slot5_oracle": 0.9492063492063492,
+        "nomination_oracle": 0.9254664438874965,
+        "union_top5_oracle": 0.9345168476747424
+      },
+      "e3": [
+        {
+          "inner_seed": 20260910,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 33,
+            "destructive_changes": 5,
+            "gain": 0.0004177109440267335,
+            "harmed_queries": 5,
+            "improved_queries": 5,
+            "net_query_equivalents": 0.5,
+            "neutral_changed_queries": 23,
+            "outcome_changing_precision": 0.5,
+            "queries": 1197,
+            "recall": 0.886480089111668,
+            "successful_rescues": 5
+          },
+          "diagnostic": {
+            "changed": 33,
+            "improved": 5,
+            "harmed": 5,
+            "incumbent_above_in_at_least_one_nominating_seed": 1,
+            "harmed_with_incumbent_above_some_seed": 1,
+            "incumbent_above_in_all_supporting_seeds": 1,
+            "harmed_with_incumbent_above_all_supporting_seeds": 1,
+            "improved_with_incumbent_above_all_supporting_seeds": 0
+          }
+        },
+        {
+          "inner_seed": 20260911,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 37,
+            "destructive_changes": 3,
+            "gain": 0.001670843776106934,
+            "harmed_queries": 3,
+            "improved_queries": 5,
+            "net_query_equivalents": 2.0,
+            "neutral_changed_queries": 29,
+            "outcome_changing_precision": 0.625,
+            "queries": 1197,
+            "recall": 0.8877332219437482,
+            "successful_rescues": 5
+          },
+          "diagnostic": {
+            "changed": 37,
+            "improved": 5,
+            "harmed": 3,
+            "incumbent_above_in_at_least_one_nominating_seed": 1,
+            "harmed_with_incumbent_above_some_seed": 0
+          }
+        }
+      ]
+    },
+    "law_source_family": {
+      "counts": {
+        "rescuable_in_c35": 89,
+        "rescuable_by_nominations": 48,
+        "rescuable_by_union_top5": 64,
+        "queries_with_nomination": 1160,
+        "two_seed_nomination_agreement": 909,
+        "nominations_where_incumbent_ranked_above": 444
+      },
+      "bounds": {
+        "baseline": 0.8860623781676413,
+        "c35_slot5_oracle": 0.9492063492063492,
+        "nomination_oracle": 0.9229601782233361,
+        "union_top5_oracle": 0.9332637148426622
+      },
+      "e3": [
+        {
+          "inner_seed": 20260910,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 13,
+            "destructive_changes": 3,
+            "gain": -0.0020885547201336674,
+            "harmed_queries": 3,
+            "improved_queries": 1,
+            "net_query_equivalents": -2.5,
+            "neutral_changed_queries": 9,
+            "outcome_changing_precision": 0.25,
+            "queries": 1197,
+            "recall": 0.8839738234475075,
+            "successful_rescues": 1
+          },
+          "diagnostic": {
+            "changed": 13,
+            "improved": 1,
+            "harmed": 3,
+            "incumbent_above_in_at_least_one_nominating_seed": 2,
+            "harmed_with_incumbent_above_some_seed": 2,
+            "incumbent_above_in_all_supporting_seeds": 1,
+            "harmed_with_incumbent_above_all_supporting_seeds": 1,
+            "improved_with_incumbent_above_all_supporting_seeds": 0
+          }
+        },
+        {
+          "inner_seed": 20260911,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 20,
+            "destructive_changes": 3,
+            "gain": -0.0004177109440267335,
+            "harmed_queries": 3,
+            "improved_queries": 3,
+            "net_query_equivalents": -0.5,
+            "neutral_changed_queries": 14,
+            "outcome_changing_precision": 0.5,
+            "queries": 1197,
+            "recall": 0.8856446672236145,
+            "successful_rescues": 3
+          },
+          "diagnostic": {
+            "changed": 20,
+            "improved": 3,
+            "harmed": 3,
+            "incumbent_above_in_at_least_one_nominating_seed": 2,
+            "harmed_with_incumbent_above_some_seed": 2,
+            "incumbent_above_in_all_supporting_seeds": 1,
+            "harmed_with_incumbent_above_all_supporting_seeds": 1,
+            "improved_with_incumbent_above_all_supporting_seeds": 0
+          }
+        }
+      ]
+    },
+    "near_duplicate_family": {
+      "counts": {
+        "rescuable_in_c35": 89,
+        "rescuable_by_nominations": 55,
+        "rescuable_by_union_top5": 71,
+        "queries_with_nomination": 1165,
+        "two_seed_nomination_agreement": 882,
+        "nominations_where_incumbent_ranked_above": 460
+      },
+      "bounds": {
+        "baseline": 0.8860623781676413,
+        "c35_slot5_oracle": 0.9492063492063492,
+        "nomination_oracle": 0.9265803397382345,
+        "union_top5_oracle": 0.9372319688109162
+      },
+      "e3": [
+        {
+          "inner_seed": 20260910,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 60,
+            "destructive_changes": 5,
+            "gain": 0.0,
+            "harmed_queries": 5,
+            "improved_queries": 5,
+            "net_query_equivalents": 0.0,
+            "neutral_changed_queries": 50,
+            "outcome_changing_precision": 0.5,
+            "queries": 1197,
+            "recall": 0.8860623781676412,
+            "successful_rescues": 5
+          },
+          "diagnostic": {
+            "changed": 60,
+            "improved": 5,
+            "harmed": 5,
+            "incumbent_above_in_at_least_one_nominating_seed": 10,
+            "harmed_with_incumbent_above_some_seed": 2,
+            "incumbent_above_in_all_supporting_seeds": 5,
+            "harmed_with_incumbent_above_all_supporting_seeds": 1,
+            "improved_with_incumbent_above_all_supporting_seeds": 0
+          }
+        },
+        {
+          "inner_seed": 20260911,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 43,
+            "destructive_changes": 5,
+            "gain": -0.0004177109440267335,
+            "harmed_queries": 5,
+            "improved_queries": 4,
+            "net_query_equivalents": -0.5,
+            "neutral_changed_queries": 34,
+            "outcome_changing_precision": 0.4444444444444444,
+            "queries": 1197,
+            "recall": 0.8856446672236145,
+            "successful_rescues": 4
+          },
+          "diagnostic": {
+            "changed": 43,
+            "improved": 4,
+            "harmed": 5,
+            "incumbent_above_in_at_least_one_nominating_seed": 3,
+            "harmed_with_incumbent_above_some_seed": 2,
+            "incumbent_above_in_all_supporting_seeds": 2,
+            "harmed_with_incumbent_above_all_supporting_seeds": 2,
+            "improved_with_incumbent_above_all_supporting_seeds": 0
+          }
+        }
+      ]
+    },
+    "query_template_family": {
+      "counts": {
+        "rescuable_in_c35": 89,
+        "rescuable_by_nominations": 55,
+        "rescuable_by_union_top5": 68,
+        "queries_with_nomination": 1168,
+        "two_seed_nomination_agreement": 889,
+        "nominations_where_incumbent_ranked_above": 467
+      },
+      "bounds": {
+        "baseline": 0.8860623781676413,
+        "c35_slot5_oracle": 0.9492063492063492,
+        "nomination_oracle": 0.9265803397382345,
+        "union_top5_oracle": 0.9351434140907825
+      },
+      "e3": [
+        {
+          "inner_seed": 20260910,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 124,
+            "destructive_changes": 12,
+            "gain": -0.0022277917014759123,
+            "harmed_queries": 12,
+            "improved_queries": 10,
+            "net_query_equivalents": -2.666666666666667,
+            "neutral_changed_queries": 102,
+            "outcome_changing_precision": 0.45454545454545453,
+            "queries": 1197,
+            "recall": 0.8838345864661654,
+            "successful_rescues": 10
+          },
+          "diagnostic": {
+            "changed": 124,
+            "improved": 10,
+            "harmed": 12,
+            "incumbent_above_in_at_least_one_nominating_seed": 24,
+            "harmed_with_incumbent_above_some_seed": 6,
+            "incumbent_above_in_all_supporting_seeds": 17,
+            "harmed_with_incumbent_above_all_supporting_seeds": 5,
+            "improved_with_incumbent_above_all_supporting_seeds": 1
+          }
+        },
+        {
+          "inner_seed": 20260911,
+          "metrics": {
+            "anchor_recall": 0.8860623781676412,
+            "changed_queries": 100,
+            "destructive_changes": 7,
+            "gain": 0.003620161514898357,
+            "harmed_queries": 7,
+            "improved_queries": 12,
+            "net_query_equivalents": 4.333333333333333,
+            "neutral_changed_queries": 81,
+            "outcome_changing_precision": 0.631578947368421,
+            "queries": 1197,
+            "recall": 0.8896825396825397,
+            "successful_rescues": 12
+          },
+          "diagnostic": {
+            "changed": 100,
+            "improved": 12,
+            "harmed": 7,
+            "incumbent_above_in_at_least_one_nominating_seed": 12,
+            "harmed_with_incumbent_above_some_seed": 4,
+            "incumbent_above_in_all_supporting_seeds": 8,
+            "harmed_with_incumbent_above_all_supporting_seeds": 4,
+            "improved_with_incumbent_above_all_supporting_seeds": 1
+          }
+        }
+      ]
+    },
+    "policy_selection": {
+      "active_folds": 29,
+      "total_folds": 40,
+      "active_with_calibration_rescues_le2": 16,
+      "calibration_n_min": 158,
+      "calibration_n_max": 226
+    }
+  }
+}

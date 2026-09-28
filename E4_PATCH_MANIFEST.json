@@ -1,0 +1,26 @@
+{
+  "kind": "legalir_e4_parity_patch",
+  "schema_version": 2,
+  "runtime_profile": "cuda_metrics_cpu_threads_capped",
+  "purpose": "One-time E4 locked-holdout parity patch. CUDA performs model and metric computation; host JSON/tokenizer I/O is capped to one worker.",
+  "holdout_result_included": false,
+  "models_or_raw_data_included": false,
+  "files": [
+    "requirements-gpuhub.txt",
+    "Task1 - LegalIR/E0_E5_CURRENT_PLAN.md",
+    "Task1 - LegalIR/E4_HANDOFF.md",
+    "Task1 - LegalIR/E4_PARITY_CONTRACT.md",
+    "Task1 - LegalIR/scripts/e1_evidence_frozen_ce.py",
+    "Task1 - LegalIR/scripts/e2_mil_finetune_oof.py",
+    "Task1 - LegalIR/scripts/e3b_residual_score_gate.py",
+    "Task1 - LegalIR/scripts/gpu_autoprobe.py",
+    "Task1 - LegalIR/scripts/gpu_transition_metrics.py",
+    "Task1 - LegalIR/scripts/e4_holdout_parity.py",
+    "Task1 - LegalIR/experiments/track_b_v11_research/run_e4_holdout_parity.sh",
+    "Task1 - LegalIR/tests/test_e1_evidence_frozen_ce.py",
+    "Task1 - LegalIR/tests/test_e2_mil_finetune_oof.py",
+    "Task1 - LegalIR/tests/test_e3b_residual_score_gate.py",
+    "Task1 - LegalIR/tests/test_e4_holdout_parity.py",
+    "Task1 - LegalIR/tests/test_gpu_transition_metrics.py"
+  ]
+}

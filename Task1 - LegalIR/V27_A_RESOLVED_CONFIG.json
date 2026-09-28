@@ -1,0 +1,75 @@
+{
+  "kind": "legalir_v27_a_resolved_config",
+  "schema_version": 1,
+  "status": "sealed_before_training",
+  "holdout_opened": false,
+  "public_labels_used": false,
+  "anchor": {
+    "candidate_limit": 35,
+    "frozen_top_k": 4,
+    "editable_slot": 5,
+    "max_prefiltered_challengers": 6
+  },
+  "model": {
+    "repository": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "revision": "1427fd652930e4ba29e8149678df786c240d8825",
+    "local_relative_path": "models/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "reported_parameter_estimate": 100000000,
+    "max_length": 384,
+    "precision": "fp16"
+  },
+  "evidence": {
+    "lexical_top_k": 2,
+    "semantic_top_k": 2,
+    "max_passages_per_document": 4,
+    "block_tokens": 384,
+    "block_overlap": 64,
+    "aggregation": "temperature_logsumexp_fixed",
+    "aggregation_temperature": 0.5,
+    "label_blind": true,
+    "empty_body_hard_veto": true
+  },
+  "training": {
+    "positive_source": "all_qrels_within_c35",
+    "loss": {
+      "pointwise_relevance_weight": 0.6,
+      "pairwise_margin_weight": 0.4
+    },
+    "seeds": [20260227, 20260301],
+    "epochs_max": 3,
+    "micro_batch": 2,
+    "gradient_accumulation": 16,
+    "gradient_checkpointing": true,
+    "learning_rate": 0.00002,
+    "weight_decay": 0.01,
+    "peak_cuda_allocated_limit_gb": 5.4,
+    "fallback": {
+      "micro_batch": 1,
+      "gradient_accumulation": 32
+    }
+  },
+  "regimes": [
+    "standard",
+    "law_source_family",
+    "query_template_family",
+    "near_duplicate_family"
+  ],
+  "gates": {
+    "oof_recall_gain_min": 0.01,
+    "robust_gain_min": 0.008,
+    "bootstrap_lower_95_min": 0.003,
+    "all_regime_gain_min": 0.0,
+    "net_query_equivalent_min": 12,
+    "outcome_changing_precision_min": 0.9,
+    "destructive_max": 2,
+    "top_1_to_4_byte_identical": true,
+    "empty_body_outputs_max": 0,
+    "seed_gain_difference_max": 0.002,
+    "holdout_gain_min": 0.008,
+    "holdout_recall_min": 0.9308333333333334
+  },
+  "model_budget": {
+    "frozen_v16b_parameters": 1090010000,
+    "pipeline_parameter_limit": 4000000000
+  }
+}

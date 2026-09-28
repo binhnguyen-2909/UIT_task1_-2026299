@@ -342,9 +342,33 @@ def load_source_stage1_evidence(
     current = read_json(split.stage1_path)
     raw_source = current.get("source_stage1_audit")
     if raw_source:
-        source_path = Path(str(raw_source))
+        # Audit artifacts were originally produced on Windows.  ``Path`` on
+        # Linux intentionally does not regard ``D:\\...`` as absolute, which
+        # otherwise produces the invalid joined path
+        # ``.../v10_9_prf/D:\\projects\\...``.  Resolve an embedded Task1
+        # relative suffix against the checked-out task root, while preserving
+        # ordinary absolute and relative artifact paths.
+        raw_value = str(raw_source)
+        source_path = Path(raw_value)
         if not source_path.is_absolute():
-            source_path = split.stage1_path.parent / source_path
+            portable = raw_value.replace("\\", "/")
+            marker = "Task1 - LegalIR/"
+            if marker in portable:
+                suffix = portable.split(marker, 1)[1]
+                task_root = next(
+                    (
+                        parent for parent in split.stage1_path.parents
+                        if parent.name == "Task1 - LegalIR"
+                    ),
+                    None,
+                )
+                if task_root is None:
+                    raise ValueError(
+                        f"Cannot resolve Task1-relative Stage-1 source: {raw_value}"
+                    )
+                source_path = task_root / suffix
+            else:
+                source_path = split.stage1_path.parent / source_path
     else:
         source_path = split.stage1_path
     source = read_json(source_path)
@@ -877,6 +901,47 @@ def apply_policy(
                     answers.append(doc_id)
                 if len(answers) == 5:
                     break
+        elif policy["kind"] == "memory_slot5":
+            # V16b is intentionally conservative: keep the locked anchor's
+            # first four answers and replace only its weakest slot when a
+            # non-anchor c35 candidate clears both gates.  The memory signal
+            # is an inference-time feature, never a label lookup.
+            answers = list(split.baseline[question][:5])
+            if len(answers) != 5:
+                raise ValueError(
+                    f"{split.name}/{split.qids[question]}: baseline must have five answers"
+                )
+            memory_feature = str(policy.get("memory_feature", "degree_corrected_memory_score"))
+            if memory_feature not in feature_names:
+                raise ValueError(f"Missing memory feature for policy: {memory_feature}")
+            memory_column = feature_names.index(memory_feature)
+            feature_block = matrix[question * candidate_limit:(question + 1) * candidate_limit]
+            tail_doc = answers[-1]
+            try:
+                tail_rank = candidates.index(tail_doc)
+                tail_model_score = float(values[tail_rank])
+                tail_memory_score = float(feature_block[tail_rank, memory_column])
+            except ValueError:
+                tail_model_score = float("-inf")
+                tail_memory_score = 0.0
+            memory_threshold = max(
+                float(policy.get("memory_floor", 0.0)),
+                tail_memory_score + float(policy.get("memory_margin", 0.0)),
+            )
+            model_threshold = tail_model_score + float(policy.get("model_margin", 0.0))
+            replacement: str | None = None
+            for rank in model_order:
+                doc_id = candidates[rank]
+                if doc_id in answers:
+                    continue
+                model_score = float(values[rank])
+                memory_score = float(feature_block[rank, memory_column])
+                if model_score < model_threshold or memory_score < memory_threshold:
+                    continue
+                replacement = doc_id
+                break
+            if replacement is not None:
+                answers = [*answers[:-1], replacement]
         elif policy["kind"] == "rrf":
             base_rank = {doc_id: rank for rank, doc_id in enumerate(split.baseline[question], 1)}
             k = float(policy["k"])

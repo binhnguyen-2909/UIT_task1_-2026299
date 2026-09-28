@@ -1,5 +1,23 @@
 # LegalIR — experiment log cô đọng
 
+## V16 boundary-research closure — 2026-08-30
+
+P0--P4 được chạy trên clean complement 1.197 query, với ba exact-memory
+overlap bị loại, không dùng public label và không mở holdout. Error waterfall
+xác nhận 67.06% oracle headroom còn lại nằm trong c35; tuy nhiên GateCal,
+Prototype-v2, utility-trained memory và DuoLegal frozen đều không vượt V16b.
+P4 tốt nhất bằng đúng V16b (`Recall@5 0.8860623782`, robust `0.8840418489`,
+IP `0.8888888889`), dưới gate kiến trúc `0.8880623782`. 
+
+Closure OOD của policy V16b: standard `0.8860624`, law-family `0.8850181`,
+template `0.8852270`, near-duplicate `0.8873155`. Paired bootstrap 10.000 lần
+so với locked c35 anchor: delta `+0.0154553`, CI95%
+`[+0.0083542, +0.0229741]`, `P(delta>0)=1.0`. P5 graph-boundary KD và P6
+joint-text không chạy vì P4 không có positive signal; đây là stop-rule đúng,
+không phải bước còn thiếu. V16b remains main; no additional holdout opening.
+Chi tiết/reproduction: `V16_BOUNDARY_RESEARCH_DISCLOSURE.md` và
+`output/v16_boundary_research/closure/`.
+
 ## 1. Kiểm tra scorer và validation
 
 Official scorer dùng set intersection, macro Recall/Precision và tối đa 5 ID.
@@ -355,3 +373,166 @@ Việc hợp nhất không thêm model hay tham số: embedding `330M` + reranke
 + selector logistic rất nhỏ = khoảng `1.09B`, vẫn strictly `<4B`. Các output
 F/G chỉ là checkpoint local để đối chiếu; artifact trình bày/nộp duy nhất là
 `v11h.zip`.
+
+## V16b memory slot-5 promotion — 2026-08-29
+
+V16b giữ nguyên c35 của v11h, thêm QREL-memory features fit-only và chỉ cho
+phép thay slot 5. Grouped complement OOF đạt `0.8860623782` so với exact
+anchor `0.8787524366`; locked holdout đạt `0.9228333333`, tăng `+0.0040000`
+so với v11h `0.9188333333`. Public leaderboard snapshot của ZIP đạt `0.9210`.
+V16b được promote và giữ làm main; SHA-256 ZIP:
+`B2816BD73AE23FBDFADD6563DC43728896F078A6AD8032B6743984B3AADADFD9`.
+
+## V16d-lite and V17a-lite follow-up gates — 2026-08-29
+
+V16d-lite graph adapter chỉ tác động query-memory KNN. Memory recall@5 tăng
+`+0.015694`, nhưng downstream V16b OOF recall không đổi `0.8860623782`; chỉ
+intervention precision tăng `0.888889 → 0.920000`. Nhánh được giữ làm
+diagnostic, không fuse và không mở holdout.
+
+V17a-lite setwise/boundary head giữ CE frozen, top-4 locked và chỉ xét anchor
+slot 5 với 6 challengers. Best complement OOF ở threshold `0.80` đạt recall
+`0.8802840434`, robust `0.8783057793`, intervention precision `0.409091`,
+thấp hơn V16b anchor lần lượt `0.886062`, `0.884042`, `0.888889`. Nhánh bị
+reject trước holdout; không mở V17b hoặc CE hidden-state extraction.
+
+Reports: `output/v16d_lite/` và `output/v17a_boundary/`. Disclosure:
+`V16_RGM_DISCLOSURE.md` và `V17_BOUNDARY_DISCLOSURE.md`. Main hiện tại vẫn là
+`output/v16b_memory_slot5.zip`, end-to-end `1.09001B < 4B`.
+
+## V20-PDG implementation — 2026-08-31
+
+Đã chuyển hướng selector theo quyết định mới trong
+`scripts/v20_pairwise_deferral_gate.py`. Module này giữ V16b làm anchor, nhận
+V18 E3B six-pack, audit P0 trước, rồi mới cho phép P1 logistic pairwise CPU-only
+với group-isolated OOF và inner calibration. Pairwise labels là rescue (1),
+destructive (0), neutral loại khỏi fit.
+
+Policy cố định top-4, chỉ xét challenger c35 ranks 6--12, tối đa một thay thế
+slot 5 và mặc định abstain ở threshold `0.90`. Exact-document QREL/prototype
+fields bị từ chối; hierarchy support chỉ đi qua feature sidecar label-free.
+Không có submission hay holdout nào được mở. P1 chỉ được promote khi đủ OOF,
+bootstrap, precision và 3/4 OOD gates trong `V20_PDG_PROTOCOL.md`.
+
+## V20-PDG P1 and V19-CATER execution — 2026-08-31
+
+P1 was run with the frozen current-passage CE signal. The observed OOF recall
+gain was `+0.0029239766` with robust gain `+0.0025695132`; paired bootstrap
+95% lower bound was `+0.0004177109`, intervention precision was `1.0`, and
+the gate made `13` changes (`4` rescues, `0` destructive). The gain is retained
+as a useful diagnostic signal, but P1 was not promoted: it missed the strict
+`+0.003` recall threshold by `0.000076`, and all four registered OOD checks
+failed the required safety contract.
+
+The prescribed V19 CATER continuation was then executed. The stop-before-
+training block aggregation oracle passed with `+0.0384990` over the best V18
+audit reference, and exactly the three registered grouped-OOF variants were
+evaluated. `weighted_blocks` was the strongest against the V16b anchor
+(`0.8939988861`, `+0.0079365`; `0.916667` intervention precision), but its
+bootstrap lower bound against best V18 was `-0.0171261`, ECE was `0.0850975`,
+and the strict standard-group worst fold was `-0.5`. `calibrated_setwise`
+had bootstrap lower `-0.0199109` and ECE `0.0753029`; `adaptive_budget`
+produced only one intervention. All three failed continuation and
+`selected_variant` is null.
+
+The CATER ledger was `1,090,010,036` parameters, below the `4B` limit. Since
+neither P1 nor CATER passed promotion, the holdout remained unopened and the
+existing `output/v16b_memory_slot5.zip` remained unchanged. No public score
+claim was made because the local public answer file has null labels.
+
+Reports: `output/v20_pairwise_deferral_gate/v20_pdg_v18b_corrected_r3_currentce.json`,
+`output/v19_cater_block_features_r1/audit/v19_cater_feature_audit.json`, and
+`output/v19_cater_block_features_r1/audit/v19_cater_grouped_oof_r1.json`.
+
+## V20 CATER-R P2 and CE representation audit — 2026-08-31
+
+The supplied V20 research report was applied as a separate CATER-R runner. It
+kept the V16b top four byte-identical, used only cached clean-complement CE/E3B
+and block features, and rejected holdout/public paths.
+
+P2-0 reproduced the immutable V16b anchor at Recall@5 `0.8860623782`. The
+label-aware stop-before-training block oracle reached `0.9395293790`, a gain of
+`+0.0394041` over the best valid V18 slot-5 boundary policy, so the required
+`+0.003` oracle gate passed.
+
+The two deterministic variants and the single calibrated setwise CATER-R
+micro-model were then evaluated. `adaptive_budget` gained `+0.0059176` but had
+intervention precision `0.594595` and bootstrap lower `-0.0028544`.
+`weighted_blocks` gained `+0.0037594` but had the same intervention precision
+and bootstrap lower `-0.0048733`. The four independently cross-fitted
+`calibrated_setwise` models used `U=P(rescue)-3P(destructive)`, nested-OOF
+thresholds, and 3/4 consensus; its result was Recall gain `0.0000000`, robust
+gain `-0.0003201`, intervention precision `0.500000`, and bootstrap lower
+`-0.0025063`. All variants failed the unchanged promotion contract and the
+strict four-regime checks; `selected_variant=null`.
+
+The CATER-R ledger remains `1.09101B < 4B`. A follow-up frozen-CE
+representation audit found AUC `0.652872` for rescue versus destructive pairs,
+with rescue median CE margin `-0.0003002` versus destructive `-0.0096724`.
+This is useful CE signal, not systematic inversion, so the conditional LoRA
+trigger was not met. No CE fine-tuning, holdout opening, public-label use, ZIP
+replacement, or submission occurred. Artifacts:
+`output/v20_cater_r/v20_cater_r_p2_report.json` and
+`output/v20_cater_r/v20_ce_representation_audit.json`.
+
+## V20 conditional P3 CE LoRA and CATER-R recheck — 2026-08-31
+
+The P2 block oracle passed while CATER-R failed its cross-regime safety
+contract, so the research report's conditional CE branch was entered. A
+single fixed LoRA arm (`r=4`, one epoch) adapted the existing 760M CE using
+only clean-complement boundary pairs. Training used 268 semi-hard pairs,
+skipped the highest-scoring negative when possible, added 1,197 frozen-CE
+anchor-preservation examples, and produced five query-hash-cross-fitted
+adapters.
+
+Unchanged CATER-R evaluation passed every clean-complement promotion check:
+Recall gain `+0.0033417`, robust gain `+0.0040910`, bootstrap lower bound
+`+0.0008354`, intervention precision `1.0`, 13 consensus interventions, and
+non-negative standard, law-family, query-template, and near-duplicate
+regimes. The adapted CE is not yet a public submission model;
+`output/v16b_memory_slot5.zip` remains the fallback.
+
+The requested holdout trial was considered but skipped because no holdout
+CATER-R evidence packs, block features, or adapted score matrix exist. A
+direct holdout opening would require a separate holdout-specific BQB/evidence
+pack materialization, so no holdout labels were opened and no new ZIP was
+submitted. Artifacts:
+`output/v20_ce_lora_r4_pack/lora_training_report.json`,
+`output/v20_ce_lora_r4_pack/adapted_current_passage_scores.json`, and
+`output/v20_cater_r_r4_pack/v20_cater_r_r4_report.json`.
+
+## V20 holdout parity audit correction — 2026-08-31
+
+Stopped the r8 `skip-bqb`/first-parseable external scorer and marked its
+outputs benchmark-only. It is not a valid promotion or submission path.
+
+Audited the existing five query-hash LoRA folds. Exact normalized-query
+duplicates are isolated, but registered group isolation is not: leaked
+validation qids are 548 standard-grouped, 605 law-family, 1,063
+query-template, and 19 near-duplicate. The P3 clean-complement result is
+therefore retained as exploratory only; no CE retune was started.
+
+Audited the four full-fit CATER heads. They are materially different, so the
+deployment remains four-head consensus. Added an exact-parity external
+preparer with the registered BM25/BQB/MMR proposer, frozen passage CE, six
+pack configurations, and no document replacement. The label-free packability
+audit found 5 invalid documents affecting 10 qids; those qids force-abstain
+while preserving the frozen boundary. Frozen current CE completed for 990
+active qids, but BQB pack construction was stopped before completion because
+the CE leakage gate failed. Holdout reference labels were not read and no
+submission was produced. The preflight remains closed.
+
+## V16b release closure and cleanup — 2026-08-31
+
+Promoted output remains unchanged: V16b is the sole eligible release at public
+`0.9210` and locked holdout `0.9228333`. A checksum-pinned capsule now records
+the complete V11h → V16a → V16b → package lineage in
+`release/v16b_0921/`; its verifier confirms 51 task paths, five workspace
+paths, and all frozen artifact hashes.
+
+The reason to stop at this point is explicit: c35 coverage limits the ceiling,
+the safety cost of a destructive rank-5 swap is high, pooled OOF does not prove
+regime transfer, and P3 lacks group-isolated adapted CE scores. All rejected
+V16-boundary/V16d/V17/V18/V19/V20 work was moved—not deleted—to
+`archive/2026-08-31_retired_experiments/`, including benchmark-only r8. The
+release path contains only code and artifacts needed to recreate V11h/V16b.

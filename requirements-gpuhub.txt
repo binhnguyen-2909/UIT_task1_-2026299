@@ -1,0 +1,11 @@
+# The GPUHub PyTorch image supplies torch/CUDA. Install the remaining runtime
+# dependencies from this file with --no-cache-dir to avoid filling the system disk.
+numpy>=1.24,<3
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+# Qwen3-Reranker uses the official yes/no causal-LM scoring interface added in
+# Transformers 4.51; older images can load a different/incomplete model API.
+transformers>=4.51,<6
+sentence-transformers>=3,<6
+accelerate>=0.34,<2
+peft>=0.12,<1

@@ -33,6 +33,8 @@ from qwen_c200_common import (  # noqa: E402
     oracle_slot5, pool_for, read_score_cache, require_complement_file, score_order,
     validate_cache_coverage,
 )
+from qwen_shortlist8 import select_shortlist8  # noqa: E402  E/F shortlist-8 path only
+from qwen_shortlist8_long_cache import MAX_DOCS_PER_QUERY, SHORTLIST_POLICY  # noqa: E402  E/F path only
 from v27_a_common import (  # noqa: E402
     EDITABLE_SLOT, V27ContractError, build_regime_groups, group_folds, json_sha256,
     load_manifest, read_json, sha256_file, write_json,
@@ -83,8 +85,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--e1-manifest", type=Path, required=True)
     parser.add_argument("--qwen-model", type=Path, required=True)
-    parser.add_argument("--short-cache-dir", type=Path, required=True)
-    parser.add_argument("--long-cache-dir", type=Path, required=True)
+    parser.add_argument("--short-cache-dir", type=Path, default=None,
+                        help="A/D path: A_c35_short cache root (shards+metadata). AEF path: ignored.")
+    parser.add_argument("--long-cache-dir", type=Path, default=None,
+                        help="A/D path: D_c200_long cache root (shards+metadata). AEF path: ignored.")
+    parser.add_argument("--eval-set", choices=("AD", "AEF"), default="AD",
+                        help="AD keeps the frozen A/B/C/D path byte-identical; AEF evaluates E_c67_short/F_shortlist8_long.")
+    parser.add_argument("--e-cache-dir", type=Path, default=None,
+                        help="AEF path: E_c67_short cache root (shards+metadata).")
+    parser.add_argument("--f-cache-dir", type=Path, default=None,
+                        help="AEF path: F_shortlist8_long cache root (shards+metadata).")
     parser.add_argument("--e3b-standard-report", type=Path, required=True)
     parser.add_argument("--e3b-stress-report", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -92,6 +102,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-path", type=Path)
     parser.add_argument("--report-path", type=Path)
     parser.add_argument("--inner-seeds", nargs="+", type=int, default=list(INNER_SEEDS))
+    parser.add_argument("--s1-thresholds", nargs="+", type=float, default=list(S1_THRESHOLDS),
+                        help="Ablation A1: S1 gap grid (default keeps frozen 0/0.25/0.5/1.0).")
+    parser.add_argument("--s1-gap-norm", choices=("absolute", "zscore"), default="absolute",
+                        help="Ablation A2: zscore divides the gap by the variant-pool logit std.")
+    parser.add_argument("--skip-f-s2", action="store_true",
+                        help="Ablation B: skip the F_shortlist8_long/S2 trial (S1-only for F).")
+    parser.add_argument("--s2-lite", action="store_true",
+                        help="Ablation B2: 2-feature S2 (gap + pool zscore) instead of 5.")
     parser.add_argument("--s2-hidden", type=int, default=16)
     parser.add_argument("--s2-epochs", type=int, default=120)
     parser.add_argument("--s2-patience", type=int, default=12)
@@ -106,15 +124,76 @@ def parse_args() -> argparse.Namespace:
 
 
 def _output_path(args: argparse.Namespace) -> Path:
-    return args.report_path or args.output_dir / f"qwen_c200_{args.mode}_report.json"
+    return args.report_path or args.output_dir / f"{_report_prefix(args)}{args.mode}_report.json"
 
 
 def _checkpoint_path(args: argparse.Namespace) -> Path:
-    return args.checkpoint_path or args.output_dir / f"qwen_c200_{args.mode}_progress.json"
+    return args.checkpoint_path or args.output_dir / f"{_report_prefix(args)}{args.mode}_progress.json"
 
 
 def _safe_path(path: Path, label: str) -> None:
     require_complement_file(path, label)
+
+
+def _active_variants(args: argparse.Namespace) -> tuple[str, ...]:
+    return EVAL_VARIANTS_EF if str(getattr(args, "eval_set", "AD")) == "AEF" else VARIANTS
+
+
+def _report_prefix(args: argparse.Namespace) -> str:
+    return "qwen_ef_" if str(getattr(args, "eval_set", "AD")) == "AEF" else "qwen_c200_"
+
+
+def _ef_e_scores(split: Any) -> Mapping[str, Mapping[str, Any]]:
+    scores = getattr(split, "_ef_e_scores", None)
+    if not isinstance(scores, Mapping):
+        raise V27ContractError("E/F evaluation requires E short scores on the split")
+    return scores  # type: ignore[return-value]
+
+
+def _variant_pool(split: Any, qid: str, variant: str) -> list[str]:
+    """Candidate pool per variant. E/F shortlist recomputes deterministically
+    from frozen E short scores; A/B/C/D read the sealed c200 universe."""
+    universe = getattr(split, "_qwen_universe", None)
+    if universe is None:
+        raise V27ContractError("Split misses the label-blind candidate universe")
+    if variant == "F_shortlist8_long":
+        return _variant_pool_with_scores(getattr(split, "_qwen_universe"), _ef_e_scores(split), str(qid))
+    return list(pool_for(universe, str(qid), variant))
+
+
+def _c67_rank_fraction(split: Any, qid: str, doc_id: str) -> float:
+    """Stage-1 c67 rank fraction (1..67)/67. Schema-honest denominator for E/F."""
+    universe = getattr(split, "_qwen_universe", None)
+    ranking = [str(value) for value in pool_for(universe, str(qid), "E_c67_short")]
+    return (ranking.index(str(doc_id)) + 1) / len(ranking)
+
+
+def _s1_grid(args: argparse.Namespace) -> list[float]:
+    grid = [float(v) for v in args.s1_thresholds]
+    if not grid or any(v < 0 for v in grid):
+        raise V27ContractError("S1 threshold grid must hold non-negative values")
+    return sorted(set(grid))
+
+
+def _s2_schema(args: argparse.Namespace | None = None) -> list[str]:
+    if args is not None and bool(getattr(args, "s2_lite", False)):
+        return ["qwen_candidate_minus_incumbent_logit", "qwen_candidate_within_pool_zscore"]
+    return list(S2_FEATURE_SCHEMA)
+
+
+def _s1_gap(*, scores: Mapping[str, Mapping[str, Any]], qid: str, pool: Sequence[str], winner: str, incumbent: str, args: argparse.Namespace | None = None) -> float:
+    raw = float(scores[qid][winner]["yes_no_logit"]) - float(scores[qid][incumbent]["yes_no_logit"])
+    if args is not None and str(getattr(args, "s1_gap_norm", "raw")) == "zscore":
+        import numpy as _np
+        values = _np.asarray([float(scores[qid][d]["yes_no_logit"]) for d in pool], dtype=_np.float32)
+        return raw / max(float(values.std()), 1.0e-6)
+    return raw
+
+
+def _propagate_qwen_attrs(target: Any, source: Any) -> None:
+    setattr(target, "_qwen_universe", getattr(source, "_qwen_universe"))
+    if hasattr(source, "_ef_e_scores"):
+        setattr(target, "_ef_e_scores", getattr(source, "_ef_e_scores"))
 
 
 def _cache_files(root: Path) -> tuple[list[Path], list[Path]]:
@@ -152,7 +231,8 @@ def _load_cache_variant(
     }
 
 
-def _lineage(args: argparse.Namespace, fingerprint: Mapping[str, str], cache_reports: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _lineage(args: argparse.Namespace, fingerprint: Mapping[str, str], cache_reports: Mapping[str, Mapping[str, Any]], variants: Sequence[str] | None = None) -> dict[str, Any]:
+    active = list(variants) if variants is not None else list(VARIANTS)
     return {
         "kind": KIND, "schema_version": SCHEMA_VERSION, "split": "complement",
         "stage1_sha256": sha256_file(args.stage1), "stage2_sha256": sha256_file(args.stage2),
@@ -161,11 +241,10 @@ def _lineage(args: argparse.Namespace, fingerprint: Mapping[str, str], cache_rep
         "qwen_model_fingerprint": dict(fingerprint),
         "short_cache_max_length": SHORT_MAX_TOKENS, "long_cache_max_length": LONG_MAX_TOKENS,
         "qwen_cache_lineages": {name: str(report["lineage_sha256"]) for name, report in sorted(cache_reports.items())},
-        "variants": list(VARIANTS), "selector_contract": {
-            "s1": {"kind": "qwen_incumbent_gap", "thresholds": list(S1_THRESHOLDS)},
-            "s2": {"kind": "tiny_mlp_top3_delta", "top_k": S2_TOP_K, "hidden": int(args.s2_hidden),
-                   "epochs": int(args.s2_epochs), "patience": int(args.s2_patience),
-                   "learning_rate": float(args.s2_learning_rate), "feature_schema": list(S2_FEATURE_SCHEMA),
+        "variants": active, "ablation": {"s1_thresholds": [float(v) for v in args.s1_thresholds], "s1_gap_norm": str(args.s1_gap_norm), "skip_f_s2": bool(args.skip_f_s2), "s2_lite": bool(args.s2_lite), "s2_feature_schema": _s2_schema(args)}, "selector_contract": {
+            "s1": {"kind": "qwen_incumbent_gap", "thresholds": [float(v) for v in args.s1_thresholds]},
+            "s2": {"kind": "tiny_mlp_top3_delta", "top_k": S2_TOP_K, "hidden": int(args.s2_hidden),                   "epochs": int(args.s2_epochs), "patience": int(args.s2_patience),
+                   "learning_rate": float(args.s2_learning_rate), "feature_schema": _s2_schema(args),
                    "policy": dict(S2_POLICY), "checkpoint_contract": S2_CHECKPOINT_KIND,
                    "decision_floor": 0.0},
             "frozen_top_k": EDITABLE_SLOT - 1, "default": "v16b_anchor_abstain",
@@ -231,24 +310,130 @@ def _preflight(args: argparse.Namespace) -> tuple[dict[str, Any], Any, dict[str,
     return report, universe, cache_scores
 
 
+def _load_f_cache(*, universe: Any, cache_dir: Path, e_scores: Mapping[str, Mapping[str, Any]]) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, Any]]:
+    """Load F_shortlist8_long shards: own lineage, shortlist-set coverage."""
+    score_paths, meta_paths = _cache_files(cache_dir)
+    first = read_json(meta_paths[0])
+    if not isinstance(first, dict) or not isinstance(first.get("lineage"), dict):
+        raise V27ContractError(f"Invalid F cache metadata: {meta_paths[0]}")
+    actual = dict(first["lineage"])
+    if actual.get("variant") != "F_shortlist8_long" or actual.get("variant") == "D_c200_long":
+        raise V27ContractError("F cache lineage must claim F_shortlist8_long, never D_c200_long")
+    for key, value in (("kind", QWEN_BRANCH_KIND), ("split", "complement"),
+                       ("stage1_sha256", universe.stage1_sha256), ("stage2_sha256", universe.stage2_sha256),
+                       ("anchor_sha256", universe.anchor_sha256), ("max_tokens", LONG_MAX_TOKENS),
+                       ("shortlist_policy", SHORTLIST_POLICY), ("holdout_opened", False), ("public_labels_used", False)):
+        if actual.get(key) != value:
+            raise V27ContractError(f"F cache preflight drift at {key}")
+    expected_sha = json_sha256(actual)
+    metas = []
+    for path in meta_paths:
+        meta = read_json(path)
+        if not isinstance(meta, dict) or meta.get("lineage_sha256") != expected_sha or meta.get("lineage") != actual:
+            raise V27ContractError(f"F cache metadata does not match frozen lineage: {path}")
+        metas.append(meta)
+    shard_ids = {(int(meta.get("shard_index", -1)), int(meta.get("shard_count", -1))) for meta in metas}
+    if len(shard_ids) != len(metas) or len({count for _, count in shard_ids}) != 1 or len(shard_ids) != next(iter(shard_ids))[1]:
+        raise V27ContractError("F cache does not contain every shard exactly once")
+    scores = read_score_cache(score_paths, expected_lineage_sha256=expected_sha)
+    for qid in universe.split.qids:
+        expected = set(_variant_pool_with_scores(universe, e_scores, str(qid)))
+        actual_docs = set(scores.get(str(qid), {}))
+        if expected != actual_docs:
+            raise V27ContractError(f"{qid}: F cache coverage differs from deterministic shortlist")
+    return scores, {
+        "cache_dir": str(cache_dir.resolve()), "score_shards": [str(path.resolve()) for path in score_paths],
+        "metadata_shards": [str(path.resolve()) for path in meta_paths], "lineage_sha256": expected_sha,
+        "qids": len(scores), "pairs": sum(len(value) for value in scores.values()),
+    }
+
+
+def _variant_pool_with_scores(universe: Any, e_scores: Mapping[str, Mapping[str, Any]], qid: str) -> list[str]:
+    index = list(universe.split.qids).index(str(qid))
+    anchor = [str(value) for value in universe.split.anchor[index]]
+    ranking = [str(value) for value in pool_for(universe, str(qid), "E_c67_short")]
+    short = {doc: float(e_scores[str(qid)][doc]["yes_no_logit"]) for doc in ranking}
+    pool = select_shortlist8(str(qid), anchor, ranking, short)
+    if not pool or len(pool) > MAX_DOCS_PER_QUERY or str(anchor[EDITABLE_SLOT - 1]) not in pool:
+        raise V27ContractError(f"{qid}: F shortlist violates incumbent/max8 contract")
+    if set(pool) & set(anchor[: EDITABLE_SLOT - 1]):
+        raise V27ContractError(f"{qid}: F shortlist leaked a frozen top-4 document")
+    return pool
+
+
+def _preflight_ef(args: argparse.Namespace) -> tuple[dict[str, Any], Any, dict[str, dict[str, dict[str, Any]]]]:
+    """Label-blind manifest for the E_c67_short/F_shortlist8_long report path."""
+    cap_cpu_threads(args.cpu_threads)
+    if len(set(args.inner_seeds)) != 2:
+        raise ValueError("E/F evaluation requires exactly two inner seeds")
+    if args.e_cache_dir is None or args.f_cache_dir is None:
+        raise ValueError("AEF path requires --e-cache-dir and --f-cache-dir")
+    for path, label in ((args.stage1, "Stage-1"), (args.stage2, "Stage-2"), (args.anchor, "V16b anchor"),
+                        (args.e1_manifest, "E1 evidence manifest"),
+                        (args.e3b_standard_report, "E3B standard report"), (args.e3b_stress_report, "E3B stress report")):
+        _safe_path(path, label)
+    universe = load_candidate_universe(stage1=args.stage1, stage2=args.stage2, anchor=args.anchor, reference=None)
+    fingerprint = checkpoint_fingerprint(args.qwen_model)
+    expected_e = {"kind": QWEN_BRANCH_KIND, "schema_version": 1, "split": "complement", "stage1_sha256": universe.stage1_sha256, "stage2_sha256": universe.stage2_sha256, "anchor_sha256": universe.anchor_sha256, "qwen_model": "Qwen/Qwen3-Reranker-0.6B", "qwen_checkpoint_fingerprint": dict(fingerprint), "variant": "E_c67_short", "pool_size": POOL_SIZES["E_c67_short"], "max_tokens": SHORT_MAX_TOKENS, "candidate_prefix_is_frozen_c35": True, "holdout_opened": False, "public_labels_used": False}
+    _, e_metas = _cache_files(args.e_cache_dir)
+    e_first = read_json(e_metas[0])
+    if not isinstance(e_first, dict) or not isinstance(e_first.get("lineage"), dict):
+        raise V27ContractError(f"Invalid E cache metadata: {e_metas[0]}")
+    e_actual = dict(e_first["lineage"])
+    for key, value in expected_e.items():
+        if e_actual.get(key) != value:
+            raise V27ContractError(f"E cache preflight drift at {key}")
+    e_scores, e_report = _load_cache_variant(universe=universe, cache_dir=args.e_cache_dir, expected_lineage=e_actual, variant="E_c67_short")
+    f_scores, f_report = _load_f_cache(universe=universe, cache_dir=args.f_cache_dir, e_scores=e_scores)
+    cache_scores = {"E_c67_short": e_scores, "F_shortlist8_long": f_scores}
+    cache_reports = {"E_c67_short": e_report, "F_shortlist8_long": f_report}
+    lineage = _lineage(args, fingerprint, cache_reports, variants=EVAL_VARIANTS_EF)
+    report = {
+        "kind": KIND, "schema_version": SCHEMA_VERSION, "stage": "label_blind_preflight", "split": "complement",
+        "lineage": lineage, "lineage_sha256": json_sha256(lineage), "cache_validation": cache_reports,
+        "queries": len(universe.split.qids), "pairs": {name: rep["pairs"] for name, rep in sorted(cache_reports.items())},
+        "planned_configurations": [f"{variant}/{selector}" for variant in EVAL_VARIANTS_EF for selector in ("S1", "S2")],
+        "model_budget": {"v16b_parameters_billion": 1.09, "qwen_parameters_billion": 0.60, "selector_parameters_billion_max": 0.001, "total_parameters_billion": 1.691, "under_4b": True},
+        "labels_opened_after_manifest": False, "holdout_opened": False, "public_labels_used": False,
+    }
+    return report, universe, cache_scores
+
+
 def _subset(split: Any, indices: Sequence[int]) -> Any:
     return e3b._subset(split, indices)
 
 
 def _pool_scores(cache_scores: Mapping[str, Mapping[str, Mapping[str, Any]]], variant: str) -> Mapping[str, Mapping[str, Any]]:
-    return cache_scores["A_c35_short"] if variant == "A_c35_short" else cache_scores["D_c200_long"]
+    if variant == "A_c35_short":
+        return cache_scores["A_c35_short"]
+    if variant in EVAL_VARIANTS_EF:
+        return cache_scores[variant]
+    return cache_scores["D_c200_long"]
 
 
 def _ranked_challengers(split: Any, index: int, scores: Mapping[str, Mapping[str, Any]], variant: str) -> tuple[list[str], str, list[str]]:
     qid = str(split.qids[index]); anchor = [str(value) for value in split.anchor[index]]
     if len(anchor) != 5 or len(set(anchor)) != 5:
         raise V27ContractError(f"{qid}: V16b anchor must contain five unique IDs")
-    pool = list(pool_for(split._qwen_universe, qid, variant))  # type: ignore[attr-defined]
-    if not set(anchor).issubset(set(pool)):
-        raise V27ContractError(f"{qid}: V16b incumbent escapes Qwen {variant} pool")
-    ranked = score_order(scores, qid, pool)
+    if variant == "F_shortlist8_long":
+        pool = _variant_pool(split, qid, variant)
+        incumbent = anchor[EDITABLE_SLOT - 1]
+        if incumbent not in set(pool):
+            raise V27ContractError(f"{qid}: V16b incumbent escapes F shortlist")
+        ranked = score_order(scores, qid, pool)
+        challengers = [doc_id for doc_id in ranked if doc_id != incumbent]
+        return challengers, incumbent, anchor
+    pool = _variant_pool(split, qid, variant)
     incumbent = anchor[EDITABLE_SLOT - 1]
-    challengers = [doc_id for doc_id in ranked if doc_id not in set(anchor[: EDITABLE_SLOT - 1]) and doc_id != incumbent]
+    ranked = score_order(scores, qid, pool)
+    if set(anchor).issubset(set(pool)):
+        challengers = [doc_id for doc_id in ranked if doc_id not in set(anchor[: EDITABLE_SLOT - 1]) and doc_id != incumbent]
+    elif incumbent in set(pool):
+        # Shortlist pool (top-4 frozen docs intentionally absent): only the
+        # incumbent is protected; everything else in the shortlist may challenge.
+        challengers = [doc_id for doc_id in ranked if doc_id != incumbent]
+    else:
+        raise V27ContractError(f"{qid}: V16b incumbent escapes Qwen {variant} pool")
     return challengers, incumbent, anchor
 
 
@@ -261,51 +446,69 @@ def _answer(anchor: Sequence[str], replacement: str | None) -> list[str]:
     return result
 
 
-def _s1_predictions(split: Any, indices: Sequence[int], scores: Mapping[str, Mapping[str, Any]], variant: str, threshold: float | None) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
+def _s1_predictions(split: Any, indices: Sequence[int], scores: Mapping[str, Mapping[str, Any]], variant: str, threshold: float | None, *, args: argparse.Namespace | None = None) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
     predictions: dict[str, dict[str, list[str]]] = {}; decisions: dict[str, Any] = {}
     for index in indices:
         qid = str(split.qids[index]); challengers, incumbent, anchor = _ranked_challengers(split, int(index), scores, variant)
         winner = challengers[0] if challengers else None
-        gap = None if winner is None else float(scores[qid][winner]["yes_no_logit"]) - float(scores[qid][incumbent]["yes_no_logit"])
+        pool = _variant_pool(split, qid, variant)
+        gap = None if winner is None else _s1_gap(scores=scores, qid=qid, pool=pool, winner=winner, incumbent=incumbent, args=args)
         replace = winner if threshold is not None and gap is not None and gap > float(threshold) + EPSILON else None
         predictions[qid] = {"answer": _answer(anchor, replace)}
         decisions[qid] = {"selector": "S1", "incumbent": incumbent, "candidate": winner, "score_gap": gap, "threshold": threshold, "changed": replace is not None}
     return predictions, decisions
 
 
-def _s1_calibrate(split: Any, scores: Mapping[str, Mapping[str, Any]], variant: str, *, device: str) -> tuple[float | None, dict[str, Any], list[dict[str, Any]]]:
+def _s1_calibrate(split: Any, scores: Mapping[str, Mapping[str, Any]], variant: str, *, device: str, args: argparse.Namespace) -> tuple[float | None, dict[str, Any], list[dict[str, Any]]]:
     trials: list[tuple[float | None, dict[str, Any]]] = []
-    for threshold in (None, *S1_THRESHOLDS):
-        predictions, _ = _s1_predictions(split, range(len(split.qids)), scores, variant, threshold)
+    for threshold in (None, *_s1_grid(args)):
+        predictions, _ = _s1_predictions(split, range(len(split.qids)), scores, variant, threshold, args=args)
         trials.append((threshold, _compact(transition_metrics_device(split, predictions, device=device))))
     eligible = [(threshold, metrics) for threshold, metrics in trials[1:] if float(metrics["gain"]) > EPSILON and int(metrics["successful_rescues"]) > int(metrics["destructive_changes"])]
     selected, selected_metrics = (None, trials[0][1]) if not eligible else max(eligible, key=lambda item: (float(item[1]["gain"]), -int(item[1]["destructive_changes"]), int(item[1]["successful_rescues"]), float(item[0] or 0.0)))
     return selected, selected_metrics, [{"threshold": threshold, "metrics": metrics, "eligible": threshold is not None and float(metrics["gain"]) > EPSILON and int(metrics["successful_rescues"]) > int(metrics["destructive_changes"])} for threshold, metrics in trials]
 
 
-def _s2_features(split: Any, index: int, scores: Mapping[str, Mapping[str, Any]], variant: str, *, with_target: bool) -> list[dict[str, Any]]:
+def _s2_features(split: Any, index: int, scores: Mapping[str, Mapping[str, Any]], variant: str, *, with_target: bool, args: argparse.Namespace | None = None) -> list[dict[str, Any]]:
+    schema = _s2_schema(args) if args is not None else list(S2_FEATURE_SCHEMA)
     qid = str(split.qids[index]); challengers, incumbent, anchor = _ranked_challengers(split, index, scores, variant)
+    if variant in EVAL_VARIANTS_EF:
+        pool = _variant_pool(split, qid, variant)
+        values = np.asarray([float(scores[qid][doc_id]["yes_no_logit"]) for doc_id in pool], dtype=np.float32)
+        scale = max(float(values.std()), 1.0e-6); incumbent_value = float(scores[qid][incumbent]["yes_no_logit"])
+        gold = set(map(str, split.references[index])) if with_target and split.references is not None else set()
+        before = len(set(anchor) & gold) / len(gold) if gold else 0.0
+        rows: list[dict[str, Any]] = []
+        for position, doc_id in enumerate(challengers[:S2_TOP_K], 1):
+            candidate_value = float(scores[qid][doc_id]["yes_no_logit"])
+            target = None
+            if gold:
+                target = len(set(_answer(anchor, doc_id)) & gold) / len(gold) - before
+            full = [candidate_value - incumbent_value, (candidate_value - float(values.mean())) / scale, _c67_rank_fraction(split, qid, doc_id), _c67_rank_fraction(split, qid, incumbent), float(position) / S2_TOP_K]
+            rows.append({"qid": qid, "doc_id": doc_id, "candidate_position": position, "features": full[:len(schema)], "target": target, "anchor": anchor, "incumbent": incumbent})
+        return rows
     pool = list(pool_for(split._qwen_universe, qid, variant))  # type: ignore[attr-defined]
     values = np.asarray([float(scores[qid][doc_id]["yes_no_logit"]) for doc_id in pool], dtype=np.float32)
     scale = max(float(values.std()), 1.0e-6); incumbent_value = float(scores[qid][incumbent]["yes_no_logit"])
     incumbent_rank = pool.index(incumbent) + 1
     gold = set(map(str, split.references[index])) if with_target and split.references is not None else set()
     before = len(set(anchor) & gold) / len(gold) if gold else 0.0
-    rows: list[dict[str, Any]] = []
+    rows2: list[dict[str, Any]] = []
     for position, doc_id in enumerate(challengers[:S2_TOP_K], 1):
         candidate_value = float(scores[qid][doc_id]["yes_no_logit"]); rank = pool.index(doc_id) + 1
         target = None
         if gold:
             target = len(set(_answer(anchor, doc_id)) & gold) / len(gold) - before
-        rows.append({"qid": qid, "doc_id": doc_id, "candidate_position": position, "features": [candidate_value - incumbent_value, (candidate_value - float(values.mean())) / scale, float(rank) / len(pool), float(incumbent_rank) / len(pool), float(position) / S2_TOP_K], "target": target, "anchor": anchor, "incumbent": incumbent})
-    return rows
+        rows2.append({"qid": qid, "doc_id": doc_id, "candidate_position": position, "features": [candidate_value - incumbent_value, (candidate_value - float(values.mean())) / scale, float(rank) / len(pool), float(incumbent_rank) / len(pool), float(position) / S2_TOP_K][:len(schema)], "target": target, "anchor": anchor, "incumbent": incumbent})
+    return rows2
 
 
-def _new_s2_model(args: argparse.Namespace) -> Any:
+def _new_s2_model(args: argparse.Namespace, n_features: int | None = None) -> Any:
     import torch
 
+    width = int(n_features) if n_features is not None else len(S2_FEATURE_SCHEMA)
     return torch.nn.Sequential(
-        torch.nn.Linear(len(S2_FEATURE_SCHEMA), int(args.s2_hidden)),
+        torch.nn.Linear(width, int(args.s2_hidden)),
         torch.nn.ReLU(),
         torch.nn.Linear(int(args.s2_hidden), 1),
     ).to(args.device)
@@ -370,7 +573,7 @@ def _atomic_backup(source: Path, backup: Path) -> str:
 
 
 def _s2_fit_dir(args: argparse.Namespace, *, regime: str, inner_seed: int, outer_fold: int, variant: str) -> Path:
-    return args.output_dir / "qwen_c200_s2_fits" / regime / f"inner_{inner_seed}" / f"fold_{outer_fold + 1}" / variant
+    return args.output_dir / f"{_report_prefix(args)}s2_fits" / regime / f"inner_{inner_seed}" / f"fold_{outer_fold + 1}" / variant
 
 
 def _s2_fit_contract(
@@ -382,7 +585,7 @@ def _s2_fit_contract(
         "kind": S2_CHECKPOINT_KIND, "schema_version": S2_CHECKPOINT_SCHEMA_VERSION,
         "lineage_sha256": lineage_sha256, "regime": regime, "inner_seed": int(inner_seed),
         "outer_fold": int(outer_fold), "variant": variant, "seed": int(seed),
-        "feature_schema": list(S2_FEATURE_SCHEMA), "architecture": {"input_features": len(S2_FEATURE_SCHEMA), "hidden": int(args.s2_hidden), "activation": "ReLU", "output": "delta_recall_at_5"},
+        "feature_schema": _s2_schema(args), "architecture": {"input_features": len(_s2_schema(args)), "hidden": int(args.s2_hidden), "activation": "ReLU", "output": "delta_recall_at_5"},
         "hyperparameters": {"epochs": int(args.s2_epochs), "patience": int(args.s2_patience), "learning_rate": float(args.s2_learning_rate), "optimizer": "AdamW", "weight_decay": 1.0e-4, "loss": "SmoothL1", "scheduler": None},
         "policy": dict(S2_POLICY),
         "partitions": {"a_fit_qids": [str(split.qids[index]) for index in a_fit], "a_stop_qids": [str(split.qids[index]) for index in a_stop], "metadata": dict(partition_metadata)},
@@ -433,7 +636,7 @@ def _model_values(model: Any, mean: Any, std: Any, rows: Sequence[Mapping[str, A
 def _s2_values(model_data: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *, args: argparse.Namespace) -> list[float]:
     import torch
 
-    model = _new_s2_model(args)
+    model = _new_s2_model(args, len(rows[0]["features"]) if rows else len(_s2_schema(args)))
     model.load_state_dict({key: value.to(args.device) for key, value in model_data["state"].items()}); model.eval()
     values = _model_values(model, model_data["mean"].to(args.device), model_data["std"].to(args.device), rows, device=args.device)
     del model; torch.cuda.empty_cache()
@@ -488,8 +691,8 @@ def _fit_s2(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     import torch
 
-    train = [row for index in a_fit for row in _s2_features(split, int(index), scores, variant, with_target=True)]
-    stop = [row for index in a_stop for row in _s2_features(split, int(index), scores, variant, with_target=True)]
+    train = [row for index in a_fit for row in _s2_features(split, int(index), scores, variant, with_target=True, args=args)]
+    stop = [row for index in a_stop for row in _s2_features(split, int(index), scores, variant, with_target=True, args=args)]
     if not train or not stop:
         raise V27ContractError("S2 nested A-fit/A-stop split has no candidate rows")
     verification_rows = sorted(stop, key=lambda row: (str(row["qid"]), int(row["candidate_position"]), str(row["doc_id"])))[: min(32, len(stop))]
@@ -502,7 +705,7 @@ def _fit_s2(
     y_stop = torch.tensor([float(row["target"]) for row in stop], dtype=torch.float32, device=args.device).unsqueeze(1)
     mean = x_train.mean(dim=0, keepdim=True); std = x_train.std(dim=0, keepdim=True).clamp_min(1.0e-6)
     torch.manual_seed(int(seed)); torch.cuda.manual_seed_all(int(seed))
-    model = _new_s2_model(args)
+    model = _new_s2_model(args, len(_s2_schema(args)))
     optimiser = torch.optim.AdamW(model.parameters(), lr=float(args.s2_learning_rate), weight_decay=1.0e-4)
     start_epoch = 1; best_loss = math.inf; best_epoch = 0; stale = 0; step = 0
     if last_path.is_file():
@@ -557,7 +760,7 @@ def _fit_s2(
         raise V27ContractError("S2 selected checkpoint backup no longer matches its primary")
     marker = {"kind": "legalir_qwen_c200_s2_fit_complete", "schema_version": 1, "fit_contract": fit_contract, "fit_contract_sha256": json_sha256(fit_contract), "last": last_verification, "selected": selected_verification, "selected_backup": {"path": str(backup_path.resolve()), "sha256": sha256_file(backup_path)}, "selection": "minimum A-stop SmoothL1 only; calibration C was not used to select a checkpoint", "complete": True}
     write_json(complete_path, marker)
-    report = {"kind": "tiny_mlp_top3_delta", "fit_candidate_rows": len(train), "stop_candidate_rows": len(stop), "epochs_completed": int(last_payload["training_cursor"]["epoch"]), "best_stop_smooth_l1": float(selected_payload["training_cursor"]["best_stop_smooth_l1"]), "best_epoch": int(selected_payload["training_cursor"]["best_epoch"]), "hidden": int(args.s2_hidden), "learning_rate": float(args.s2_learning_rate), "seed": int(seed), "feature_schema": list(S2_FEATURE_SCHEMA), "policy": dict(S2_POLICY), "fit_contract_sha256": json_sha256(fit_contract), "artifacts": {"directory": str(fit_dir.resolve()), "last": last_verification, "selected": selected_verification, "selected_backup": marker["selected_backup"], "complete_marker": str(complete_path.resolve())}, "checkpoint_verified": True}
+    report = {"kind": "tiny_mlp_top3_delta", "fit_candidate_rows": len(train), "stop_candidate_rows": len(stop), "epochs_completed": int(last_payload["training_cursor"]["epoch"]), "best_stop_smooth_l1": float(selected_payload["training_cursor"]["best_stop_smooth_l1"]), "best_epoch": int(selected_payload["training_cursor"]["best_epoch"]), "hidden": int(args.s2_hidden), "learning_rate": float(args.s2_learning_rate), "seed": int(seed), "feature_schema": _s2_schema(args), "policy": dict(S2_POLICY), "fit_contract_sha256": json_sha256(fit_contract), "artifacts": {"directory": str(fit_dir.resolve()), "last": last_verification, "selected": selected_verification, "selected_backup": marker["selected_backup"], "complete_marker": str(complete_path.resolve())}, "checkpoint_verified": True}
     del model, x_train, y_train, x_stop, y_stop
     torch.cuda.empty_cache()
     return selected_data, report
@@ -566,13 +769,14 @@ def _fit_s2(
 def _s2_predictions(split: Any, indices: Sequence[int], scores: Mapping[str, Mapping[str, Any]], variant: str, model_data: Mapping[str, Any], *, args: argparse.Namespace) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
     import torch
 
-    model = torch.nn.Sequential(torch.nn.Linear(5, int(args.s2_hidden)), torch.nn.ReLU(), torch.nn.Linear(int(args.s2_hidden), 1)).to(args.device)
+    width = int(model_data["state"]["0.weight"].shape[1])
+    model = torch.nn.Sequential(torch.nn.Linear(width, int(args.s2_hidden)), torch.nn.ReLU(), torch.nn.Linear(int(args.s2_hidden), 1)).to(args.device)
     model.load_state_dict({key: value.to(args.device) for key, value in model_data["state"].items()}); model.eval()
     mean, std = model_data["mean"].to(args.device), model_data["std"].to(args.device)
     predictions: dict[str, dict[str, list[str]]] = {}; decisions: dict[str, Any] = {}
     with torch.inference_mode():
         for index in indices:
-            rows = _s2_features(split, int(index), scores, variant, with_target=False)
+            rows = _s2_features(split, int(index), scores, variant, with_target=False, args=args)
             qid = str(split.qids[index]); anchor = [str(value) for value in split.anchor[index]]
             if rows:
                 features = torch.tensor([row["features"] for row in rows], dtype=torch.float32, device=args.device)
@@ -597,7 +801,7 @@ def _ranking_diagnostic(split: Any, indices: Sequence[int], scores: Mapping[str,
         raise V27ContractError("Qwen ranking diagnostic needs complement qrels")
     r1: list[float] = []; r3: list[float] = []
     for index in indices:
-        qid = str(split.qids[index]); ranked = score_order(scores, qid, pool_for(split._qwen_universe, qid, variant))  # type: ignore[attr-defined]
+        qid = str(split.qids[index]); ranked = score_order(scores, qid, _variant_pool(split, qid, variant))
         gold = set(map(str, split.references[index])); r1.append(len(set(ranked[:1]) & gold) / len(gold)); r3.append(len(set(ranked[:3]) & gold) / len(gold))
     return {"qwen_rank_recall_at_1": float(np.mean(r1)), "qwen_rank_recall_at_3": float(np.mean(r3)), "queries": len(r1)}
 
@@ -618,16 +822,21 @@ def _run_fold(*, args: argparse.Namespace, split: Any, groups: np.ndarray, cache
     # 1,197 c200 lists into every nested fold.
     setattr(calibration, "_qwen_universe", split._qwen_universe)  # type: ignore[attr-defined]
     setattr(validation_split, "_qwen_universe", split._qwen_universe)  # type: ignore[attr-defined]
+    _propagate_qwen_attrs(calibration, split)
+    _propagate_qwen_attrs(validation_split, split)
     trials: list[dict[str, Any]] = []
-    for variant in VARIANTS:
+    active_variants = _active_variants(args)
+    for variant in active_variants:
         scores = _pool_scores(cache_scores, variant)
-        threshold, s1_calibration, threshold_trace = _s1_calibrate(calibration, scores, variant, device=args.device)
-        c_predictions, _ = _s1_predictions(calibration, range(len(calibration.qids)), scores, variant, threshold)
-        v_predictions, v_decisions = _s1_predictions(validation_split, range(len(validation_split.qids)), scores, variant, threshold)
+        threshold, s1_calibration, threshold_trace = _s1_calibrate(calibration, scores, variant, device=args.device, args=args)
+        c_predictions, _ = _s1_predictions(calibration, range(len(calibration.qids)), scores, variant, threshold, args=args)
+        v_predictions, v_decisions = _s1_predictions(validation_split, range(len(validation_split.qids)), scores, variant, threshold, args=args)
         trials.append({"name": f"{variant}/S1", "variant": variant, "selector": "S1", "selected_threshold": threshold, "threshold_trace": threshold_trace, "calibration_metrics": s1_calibration, "calibration_predictions": c_predictions, "validation_predictions": v_predictions, "validation_decisions": v_decisions, "fit": None})
+        if bool(args.skip_f_s2) and variant == "F_shortlist8_long":
+            continue
         model_data, fit = _fit_s2(
             split, partitions["a_fit"], partitions["a_stop"], scores, variant,
-            args=args, seed=int(inner_seed) + 1000 * (outer_fold + 1) + VARIANTS.index(variant),
+            args=args, seed=int(inner_seed) + 1000 * (outer_fold + 1) + active_variants.index(variant),
             regime=regime, inner_seed=inner_seed, outer_fold=outer_fold,
             lineage_sha256=lineage_sha256, partition_metadata=partition_metadata,
         )
@@ -644,8 +853,8 @@ def _run_fold(*, args: argparse.Namespace, split: Any, groups: np.ndarray, cache
         predictions = selected["validation_predictions"]; decisions = selected["validation_decisions"]
         validation_metrics = _compact(transition_metrics_device(validation_split, predictions, device=args.device))
         selected_policy = {"name": selected_name, "variant": selected["variant"], "selector": selected["selector"], "threshold": selected["selected_threshold"]}
-    pool_oracles = {variant: oracle_slot5(validation_split, {str(qid): pool_for(split._qwen_universe, str(qid), variant) for qid in validation_split.qids}) for variant in VARIANTS}  # type: ignore[attr-defined]
-    ranking = {variant: _ranking_diagnostic(validation_split, range(len(validation_split.qids)), _pool_scores(cache_scores, variant), variant) for variant in VARIANTS}
+    pool_oracles = {variant: oracle_slot5(validation_split, {str(qid): _variant_pool(split, str(qid), variant) for qid in validation_split.qids}) for variant in active_variants}
+    ranking = {variant: _ranking_diagnostic(validation_split, range(len(validation_split.qids)), _pool_scores(cache_scores, variant), variant) for variant in active_variants}
     return predictions, {"outer_fold": int(outer_fold), "partitions": partition_metadata, "selected_configuration": selected_policy, "calibration_configuration_trace": trace, "validation": validation_metrics, "validation_pool_oracles": pool_oracles, "validation_qwen_ranking": ranking, "decisions": decisions}
 
 
@@ -704,9 +913,15 @@ def _gate(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    manifest, label_blind_universe, cache_scores = _preflight(args)
+    is_ef = str(args.eval_set) == "AEF"
+    if is_ef:
+        manifest, label_blind_universe, cache_scores = _preflight_ef(args)
+    else:
+        if args.short_cache_dir is None or args.long_cache_dir is None:
+            raise ValueError("AD path requires --short-cache-dir and --long-cache-dir")
+        manifest, label_blind_universe, cache_scores = _preflight(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = args.output_dir / f"qwen_c200_{args.mode}_label_blind_manifest.json"
+    manifest_path = args.output_dir / f"{_report_prefix(args)}{args.mode}_label_blind_manifest.json"
     write_json(manifest_path, manifest)
     if args.mode == "preflight":
         return manifest
@@ -719,6 +934,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     universe = load_candidate_universe(stage1=args.stage1, stage2=args.stage2, anchor=args.anchor, reference=args.reference)
     split = universe.split
     setattr(split, "_qwen_universe", universe)
+    if is_ef:
+        setattr(split, "_ef_e_scores", cache_scores["E_c67_short"])
     evidence = load_manifest(args.e1_manifest)
     groups_by_regime = build_regime_groups(split, evidence)
     regimes = (STANDARD_REGIME,) if args.mode == "standard" else STRESS_REGIMES

@@ -67,3 +67,7 @@ Task1 - LegalIR/TASK2_TRANSFER.md
 # Project-local RTK binary and runtime analytics/tee state
 .tools/
 .rtk/
+
+# Local-only retired experiments and scratch
+Task1 - LegalIR/archive/
+tmp/

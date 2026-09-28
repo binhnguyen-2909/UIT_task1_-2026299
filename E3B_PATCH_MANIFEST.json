@@ -1,0 +1,86 @@
+{
+  "kind": "legalir_e3b_patch",
+  "schema_version": 1,
+  "created_at": "2026-09-10T04:29:47.4673639Z",
+  "extraction_root": "validated E0-E2 capsule root",
+  "purpose": "Complement-only E3-B nested MIL patch; unzip at capsule root.",
+  "e3b_gpu_result_included": false,
+  "holdout_or_public_artifacts_included": false,
+  "files": [
+    {
+      "archive_path": "Task1 - LegalIR/E3B_HANDOFF.md",
+      "bytes": 5187,
+      "sha256": "40e0b9e6c8416037d3fc886b009e1c803d6b0aa937a65f07e63db470170f7a5f"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/E3B_NESTED_MIL_PROTOCOL.md",
+      "bytes": 3577,
+      "sha256": "1d3f84e0e025d8598ca8f5bb0e60818e71bc4498fad08a18b148d2dfd1ae140a"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/E0_E5_CURRENT_PLAN.md",
+      "bytes": 3793,
+      "sha256": "b695eeec059c384c8e2e17f187ce8bfba09e40c99f5a3c9b597b785e10dc7c05"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/scripts/e2_mil_finetune_oof.py",
+      "bytes": 42863,
+      "sha256": "dce42a1dddffcd0269e6e33ad5d89677fb83bdf19b5798252911a28179840705"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/scripts/e3b_residual_score_gate.py",
+      "bytes": 14668,
+      "sha256": "5fff64b8b88f6551fb4b76fbaf246720a1a108f95467376938898b5434a02928"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/scripts/e3b_nested_mil_scores.py",
+      "bytes": 40197,
+      "sha256": "bd2c4ee8eb7a9a96f0be6a534befa9cde1b53e7269cba8cffbefb6a03956e32f"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/scripts/gpu_autoprobe.py",
+      "bytes": 12840,
+      "sha256": "9910475b6d72aaa1d55a00193e6e627442deded6e832d24d4f8536909ce0e66a"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/experiments/track_b_v11_research/run_e3b_nested_mil.sh",
+      "bytes": 2988,
+      "sha256": "41a865c82bc427eaafb01320d8c146776ac5c7783138e5a6046fbaefeb539788"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/tests/test_e2_mil_finetune_oof.py",
+      "bytes": 5092,
+      "sha256": "715d45afed07148d9bef97d8cb04f1fcea63857be2caa7c7532bbb7c81fca616"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/tests/test_e3b_residual_score_gate.py",
+      "bytes": 4554,
+      "sha256": "f60ccbe48a1a40cb7c1b07272cc25eba00e9edbb0cca94ea05ac6563905ffb16"
+    },
+    {
+      "archive_path": "Task1 - LegalIR/tests/test_e3b_nested_mil_scores.py",
+      "bytes": 3711,
+      "sha256": "84c39eba8bc39a8a9bd2b91484573d19a4175f69215839058cfce699a9c6be95"
+    },
+    {
+      "archive_path": "requirements-gpuhub.txt",
+      "bytes": 283,
+      "sha256": "151b69c9d12a4d43cecb76ce7127231dd73b45045160515010ef33c3b22105ad"
+    },
+    {
+      "archive_path": "E3B_RESEARCH/LegalIR_E3B_Research.md",
+      "bytes": 32989,
+      "sha256": "8bf49d9edc14e160cc6884aaa1ef2842e27016fed2515ce496864924d6df4755"
+    },
+    {
+      "archive_path": "E3B_RESEARCH/LegalIR_E3B_Audit.json",
+      "bytes": 11781,
+      "sha256": "a673c423a045105e798e6d1b61e149a73c88c804afe45d165773c091c1009f14"
+    },
+    {
+      "archive_path": "E3B_RESEARCH/LegalIR_E3B_Research.pdf",
+      "bytes": 136977,
+      "sha256": "f610df455a974e12daf8fa5a5f1f604a9e65d8124a94364387f366b7e0b7c3ce"
+    }
+  ]
+}
